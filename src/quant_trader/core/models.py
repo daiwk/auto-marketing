@@ -28,6 +28,12 @@ class ReviewAction(StrEnum):
     REJECT = "reject"
 
 
+class SignalSide(StrEnum):
+    """V1 is long-only, so every actionable intent must explicitly be a buy."""
+
+    BUY = "buy"
+
+
 class _ImmutableModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -39,12 +45,13 @@ class LLMReview(_ImmutableModel):
     thesis: NonEmptyText
     risks: tuple[NonEmptyText, ...] = ()
     invalidation: NonEmptyText
-    anomalies: tuple[NonEmptyText, ...] = ()
+    input_anomalies: tuple[NonEmptyText, ...] = ()
 
 
 class SignalIntent(_ImmutableModel):
     decision_id: Identifier
     ticker: Ticker
+    side: SignalSide
     proposed_weight: float = Field(ge=0, le=1)
     signal_time: datetime
     earliest_execution_time: datetime

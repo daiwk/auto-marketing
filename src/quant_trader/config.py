@@ -52,7 +52,7 @@ class LLMSettings(_StrictModel):
     model: str = "MiniMax-M2.7"
     prompt_version: str = "v1"
     timeout_seconds: float = Field(default=30, gt=0)
-    retries: int = Field(default=2, ge=0)
+    max_retries: int = Field(default=2, ge=0, le=5)
 
 
 class Settings(_StrictModel):

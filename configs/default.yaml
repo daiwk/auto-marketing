@@ -20,4 +20,4 @@ llm:
   model: MiniMax-M2.7
   prompt_version: v1
   timeout_seconds: 30
-  retries: 2
+  max_retries: 2

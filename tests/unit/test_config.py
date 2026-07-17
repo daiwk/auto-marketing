@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from quant_trader.config import load_settings
+from quant_trader.config import LLMSettings, load_settings
 
 
 def test_load_settings_uses_safe_defaults(tmp_path: Path) -> None:
@@ -44,3 +44,9 @@ def test_load_settings_rejects_unordered_drawdown_thresholds(tmp_path: Path) -> 
 
     with pytest.raises(ValidationError, match="reduce_drawdown"):
         load_settings(config)
+
+
+def test_llm_settings_rejects_more_than_five_retries() -> None:
+    assert LLMSettings(max_retries=5).max_retries == 5
+    with pytest.raises(ValidationError):
+        LLMSettings(max_retries=6)
