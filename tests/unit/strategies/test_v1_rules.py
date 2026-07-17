@@ -152,9 +152,9 @@ def test_candidate_rejects_invalid_base_weight(weight: object) -> None:
         Candidate("AAA", 1, 0.2, 2, 100, weight)  # type: ignore[arg-type]
 
 
-def test_strategy_protocol_uses_plural_reviews_keyword() -> None:
-    assert "reviews" in signature(Strategy.generate).parameters
-    assert "review" not in signature(Strategy.generate).parameters
+def test_strategy_protocol_uses_typed_candidates_input() -> None:
+    assert "candidates" in signature(Strategy.generate).parameters
+    assert "reviews" not in signature(Strategy.generate).parameters
 
 
 def test_rank_rejects_duplicate_canonical_tickers_before_sizing() -> None:
