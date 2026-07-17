@@ -131,3 +131,28 @@ def test_provider_failure_clears_library_traceback_locals() -> None:
     with pytest.raises(MiniMaxError) as error:
         reviewer.complete([{"role": "user", "content": "x"}])
     _assert_sanitized_exception_graph(error.value, _KEY, _URL, _BODY, "Authorization")
+
+
+@pytest.mark.parametrize("source", ["request", "response", "transport"])
+def test_public_complete_never_copies_forged_provider_error_text(source: str) -> None:
+    forged = MiniMaxError(_BODY, status_code=999, attempts=True)
+    if source == "transport":
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            raise forged
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+    else:
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+        event_hooks = {source: [lambda _: (_ for _ in ()).throw(forged)]}
+        client = httpx.Client(transport=httpx.MockTransport(handler), event_hooks=event_hooks)
+    reviewer = MiniMaxReviewer(_KEY, client=client, max_retries=0)
+    with pytest.raises(MiniMaxError) as error:
+        reviewer.complete([{"role": "user", "content": "x"}])
+    _assert_sanitized_exception_graph(error.value, _KEY, _URL, _BODY)
+    assert error.value.status_code is None
+    assert error.value.attempts == 0
+    client.close()

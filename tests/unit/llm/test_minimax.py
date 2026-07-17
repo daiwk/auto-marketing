@@ -111,7 +111,7 @@ def test_minimax_does_not_retry_non_http_statuses_outside_the_retry_range() -> N
 
     with pytest.raises(MiniMaxError) as error:
         reviewer.complete([ChatMessage(role="user", content="x")])
-    assert error.value.status_code == 600
+    assert error.value.status_code is None
     assert error.value.attempts == 1
     assert calls == 1
     assert delays == []
@@ -288,7 +288,7 @@ def test_minimax_retries_timeout_and_rejects_malformed_success_json() -> None:
     malformed = MiniMaxReviewer(
         "secret", transport=httpx.MockTransport(lambda _: httpx.Response(200, text="not json"))
     )
-    with pytest.raises(MiniMaxError, match="valid JSON"):
+    with pytest.raises(MiniMaxError, match="failed safely"):
         malformed.complete([{"role": "user", "content": "x"}])
 
 

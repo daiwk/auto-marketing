@@ -193,19 +193,19 @@ class MiniMaxReviewer:
         del messages
         failed_status: int | None = None
         failed_attempts = 0
-        failed_message = "MiniMax request failed safely"
         try:
             return self._complete_request(canonical)
         except MiniMaxError as error:
-            failed_status = error.status_code
-            failed_attempts = error.attempts
-            failed_message = str(error)
+            if type(error) is MiniMaxError:
+                if type(error.status_code) is int and 100 <= error.status_code <= 599:
+                    failed_status = error.status_code
+                if type(error.attempts) is int and 0 <= error.attempts <= self.max_retries + 1:
+                    failed_attempts = error.attempts
             _clear_traceback_frames(error)
         except Exception as error:
             _clear_traceback_frames(error)
-            failed_message = "MiniMax request failed safely"
         _raise_minimax_error(
-            failed_message,
+            "MiniMax request failed safely",
             "provider-failure",
             status_code=failed_status,
             attempts=failed_attempts,
