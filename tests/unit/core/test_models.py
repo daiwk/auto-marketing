@@ -117,7 +117,7 @@ def test_signal_intent_rejects_naive_datetimes() -> None:
         )
 
 
-def test_signal_intent_requires_execution_after_signal_and_normalizes_ticker() -> None:
+def test_signal_intent_requires_execution_on_a_later_date_and_normalizes_ticker() -> None:
     now = datetime(2026, 1, 2, 10, 0, tzinfo=UTC)
     intent = SignalIntent(
         decision_id="decision-1",
@@ -125,7 +125,7 @@ def test_signal_intent_requires_execution_after_signal_and_normalizes_ticker() -
         side=SignalSide.BUY,
         proposed_weight=0.1,
         signal_time=now,
-        earliest_execution_time=now + timedelta(minutes=1),
+        earliest_execution_time=now + timedelta(days=1),
         stop_price=100,
         invalidation="Price falls below support.",
         reason_codes=["momentum"],
@@ -135,8 +135,12 @@ def test_signal_intent_requires_execution_after_signal_and_normalizes_ticker() -
     )
     assert intent.ticker == "SPY"
 
-    with pytest.raises(ValidationError, match="later"):
+    with pytest.raises(ValidationError, match="later date"):
         SignalIntent(**(intent.model_dump() | {"earliest_execution_time": now}))
+    with pytest.raises(ValidationError, match="later date"):
+        SignalIntent(
+            **(intent.model_dump() | {"earliest_execution_time": now + timedelta(hours=1)})
+        )
 
 
 def test_signal_intent_requires_a_valid_explicit_side() -> None:
@@ -147,7 +151,7 @@ def test_signal_intent_requires_a_valid_explicit_side() -> None:
         "side": "buy",
         "proposed_weight": 0.1,
         "signal_time": now,
-        "earliest_execution_time": now + timedelta(minutes=1),
+        "earliest_execution_time": now + timedelta(days=1),
         "stop_price": 100,
         "invalidation": "Price falls below support.",
         "reason_codes": ["momentum"],

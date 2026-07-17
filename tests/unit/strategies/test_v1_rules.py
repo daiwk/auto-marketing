@@ -4,6 +4,7 @@ from datetime import date
 from inspect import signature
 from math import fsum
 from sys import float_info
+from typing import get_type_hints
 
 import pytest
 
@@ -152,9 +153,15 @@ def test_candidate_rejects_invalid_base_weight(weight: object) -> None:
         Candidate("AAA", 1, 0.2, 2, 100, weight)  # type: ignore[arg-type]
 
 
-def test_strategy_protocol_uses_typed_candidates_input() -> None:
-    assert "candidates" in signature(Strategy.generate).parameters
-    assert "reviews" not in signature(Strategy.generate).parameters
+def test_shared_strategy_protocol_has_no_v1_dependency_and_returns_core_intents() -> None:
+    from quant_trader.core.models import SignalIntent
+
+    assert "candidates" not in signature(Strategy.generate).parameters
+    assert get_type_hints(Strategy.generate)["return"] == tuple[SignalIntent, ...]
+    assert Strategy.generate.__module__ == "quant_trader.strategies.base"
+    assert (
+        "v1_rules_llm" not in open(Strategy.generate.__code__.co_filename, encoding="utf-8").read()
+    )
 
 
 def test_rank_rejects_duplicate_canonical_tickers_before_sizing() -> None:

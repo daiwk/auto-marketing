@@ -1,16 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import UTC, date, datetime, timedelta
+from inspect import signature
 
 import pandas as pd
 import pytest
 
-from quant_trader.core.models import ReviewAction
+from quant_trader.core.models import ReviewAction, SignalIntent
 from quant_trader.features.snapshot import FeatureRow, FeatureSnapshot
+from quant_trader.llm.cache import review_cache_key
 from quant_trader.llm.minimax import MiniMaxError
-from quant_trader.strategies.v1_rules_llm.rules import Candidate
-from quant_trader.strategies.v1_rules_llm.strategy import V1RulesLLMStrategy, review_candidate
+from quant_trader.strategies.v1_rules_llm import strategy as strategy_module
+from quant_trader.strategies.v1_rules_llm.prompt import render_review_prompt
+from quant_trader.strategies.v1_rules_llm.rules import Candidate, rank_candidates
+from quant_trader.strategies.v1_rules_llm.strategy import (
+    MAX_AUDIT_RAW_BYTES,
+    MAX_AUDIT_RAW_CHARS,
+    V1RulesLLMStrategy,
+    V1StrategyConfig,
+    review_candidate,
+)
 
 
 def feature(ticker: str = "AAA", **changes: object) -> FeatureRow:
@@ -29,19 +41,6 @@ def feature(ticker: str = "AAA", **changes: object) -> FeatureRow:
     }
     values.update(changes)
     return FeatureRow(**values)  # type: ignore[arg-type]
-
-
-def candidate(ticker: str = "AAA", **changes: object) -> Candidate:
-    values: dict[str, object] = {
-        "ticker": ticker,
-        "score": 1.5,
-        "annualized_volatility": 0.2,
-        "atr_14": 2.0,
-        "close": 100.0,
-        "base_weight": 0.1,
-    }
-    values.update(changes)
-    return Candidate(**values)  # type: ignore[arg-type]
 
 
 def snapshot(*rows: FeatureRow) -> FeatureSnapshot:
@@ -75,163 +74,40 @@ class Reviewer:
         return outcome  # type: ignore[return-value]
 
 
-def strategy(reviewer: Reviewer) -> V1RulesLLMStrategy:
-    return V1RulesLLMStrategy(reviewer, model="model-a")
+def strategy(reviewer: Reviewer, config: V1StrategyConfig | None = None) -> V1RulesLLMStrategy:
+    return V1RulesLLMStrategy(reviewer, model="model-a", config=config)
 
 
 def times() -> tuple[datetime, datetime]:
-    signal = datetime(2025, 1, 2, 16, tzinfo=UTC)
-    return signal, signal + timedelta(hours=1)
+    return (
+        datetime(2025, 1, 2, 16, tzinfo=UTC),
+        datetime(2025, 1, 3, 9, 30, tzinfo=UTC),
+    )
 
 
-def generated(reviewer: Reviewer, candidates: object = None, snap: FeatureSnapshot | None = None):
-    source = snap or snapshot(feature())
+def decide(
+    reviewer: Reviewer,
+    snap: FeatureSnapshot | None = None,
+    *,
+    config: V1StrategyConfig | None = None,
+    cash_weight: float = 0.8,
+    current_weights: dict[str, float] | None = None,
+):
     signal, execution = times()
-    return strategy(reviewer).generate(
-        source,
-        (candidate(),) if candidates is None else candidates,
+    return strategy(reviewer, config).decide(
+        snap or snapshot(feature()),
         signal_time=signal,
         earliest_execution_time=execution,
-        cash_weight=0.8,
-        current_weights={"AAA": 0.1},
+        cash_weight=cash_weight,
+        current_weights={"AAA": 0.1} if current_weights is None else current_weights,
         drawdown=0.02,
     )
 
 
-def test_maintain_keeps_base_weight_and_audits_immutable_result() -> None:
-    decisions = generated(Reviewer([response()]))
-
-    assert isinstance(decisions, tuple)
-    assert decisions[0].intent.proposed_weight == 0.1
-    assert decisions[0].review_outcome.review.action is ReviewAction.MAINTAIN
-    assert decisions[0].review_outcome.raw_outputs == (response(),)
-    with pytest.raises((AttributeError, TypeError)):
-        decisions[0].failure_reason = "nope"  # type: ignore[misc]
-
-
-def test_reduce_never_increases_target_and_reject_has_zero_weight() -> None:
-    reduced = generated(Reviewer([response("reduce", 0.4)]))[0]
-    rejected = generated(Reviewer([response("reject", 0.0)]))[0]
-
-    assert reduced.intent.proposed_weight == pytest.approx(0.04)
-    assert reduced.intent.proposed_weight <= reduced.candidate.base_weight
-    assert rejected.intent.proposed_weight == 0
-
-
-@pytest.mark.parametrize(
-    ("first", "second"),
-    [
-        (response("maintain", 0.4), response()),
-        ("not json", response()),
-    ],
-)
-def test_invalid_first_output_gets_one_clean_repair(first: str, second: str) -> None:
-    reviewer = Reviewer([first, second])
-    decision = generated(reviewer)[0]
-
-    assert len(reviewer.messages) == 2
-    assert decision.review_outcome.repair_used is True
-    assert decision.review_outcome.review.action is ReviewAction.MAINTAIN
-    assert first not in reviewer.messages[1][-1].content
-    assert "failed schema" in reviewer.messages[1][-1].content.lower()
-
-
-def test_two_invalid_outputs_fail_closed_without_leaking_model_body() -> None:
-    bad = "MODEL_BODY_SENTINEL"
-    decision = generated(Reviewer([bad, bad]))[0]
-
-    assert decision.intent.proposed_weight == 0
-    assert decision.review_outcome.failure_reason == "invalid_review"
-    assert decision.review_outcome.raw_outputs == (bad, bad)
-    assert bad not in " ".join(decision.intent.reason_codes)
-
-
-def test_provider_error_does_not_repair_or_retain_exception_text() -> None:
-    error = MiniMaxError("EXCEPTION_SENTINEL", status_code=None, attempts=1)
-    reviewer = Reviewer([error])
-    decision = generated(reviewer)[0]
-
-    assert len(reviewer.messages) == 1
-    assert decision.intent.proposed_weight == 0
-    assert decision.review_outcome.raw_outputs == ()
-    assert "EXCEPTION_SENTINEL" not in str(decision)
-
-
-def test_repair_provider_error_and_unexpected_reviewer_error_are_safe() -> None:
-    repair_error = generated(Reviewer(["bad", MiniMaxError("BODY", status_code=None, attempts=1)]))[
-        0
-    ]
-    unexpected = generated(Reviewer([RuntimeError("BODY")]))[0]
-
-    assert repair_error.intent.proposed_weight == 0
-    assert repair_error.review_outcome.failure_reason == "repair_provider_failure"
-    assert unexpected.intent.proposed_weight == 0
-    assert "BODY" not in str(unexpected)
-
-
-def test_unexpected_repair_error_is_sanitized_after_preserving_first_raw_output() -> None:
-    first = "FIRST_INVALID_BODY"
-    reviewer = Reviewer([first, RuntimeError("EXCEPTION_BODY")])
-    decision = generated(reviewer)[0]
-
-    assert len(reviewer.messages) == 2
-    assert decision.review_outcome.repair_used is True
-    assert decision.review_outcome.failure_reason == "repair_provider_failure"
-    assert decision.review_outcome.raw_outputs == (first,)
-    assert decision.intent.llm_cache_key == decision.review_outcome.cache_key
-    assert "EXCEPTION_BODY" not in str(decision)
-
-
-def test_review_helper_leaves_unexpected_errors_to_the_public_strategy_boundary() -> None:
-    with pytest.raises(RuntimeError, match="BODY"):
-        review_candidate(
-            Reviewer([RuntimeError("BODY")]),
-            ({"role": "user", "content": "x"},),
-            model="model",
-            prompt_version="v1",
-        )
-
-
-def test_one_candidate_failure_does_not_stop_another_or_add_a_ticker() -> None:
-    rows = (feature("AAA"), feature("BBB"))
-    reviewer = Reviewer(["bad", "still bad", response()])
-    decisions = generated(reviewer, (candidate("AAA"), candidate("BBB")), snapshot(*rows))
-
-    assert [decision.intent.ticker for decision in decisions] == ["AAA", "BBB"]
-    assert decisions[0].intent.proposed_weight == 0
-    assert decisions[1].intent.proposed_weight == 0.1
-
-
-def test_input_validation_ordering_ids_and_cache_are_deterministic() -> None:
-    rows = (feature("AAA"), feature("BBB"))
-    candidates = (candidate("BBB"), candidate("AAA"))
-    first = generated(Reviewer([response(), response()]), candidates, snapshot(*rows))
-    second = generated(
-        Reviewer([response(), response()]), tuple(reversed(candidates)), snapshot(*rows)
-    )
-
-    assert [decision.candidate.ticker for decision in first] == ["AAA", "BBB"]
-    assert [decision.intent.decision_id for decision in first] == [
-        decision.intent.decision_id for decision in second
-    ]
-    assert [decision.intent.llm_cache_key for decision in first] == [
-        decision.intent.llm_cache_key for decision in second
-    ]
-    assert first[0].intent.llm_cache_key[:24] in first[0].intent.decision_id
-    with pytest.raises(ValueError, match="duplicate"):
-        generated(Reviewer([]), (candidate("AAA"), candidate("AAA")))
-    with pytest.raises(ValueError, match="missing"):
-        generated(Reviewer([]), (candidate("ZZZ"),))
-    with pytest.raises(ValueError, match="match"):
-        generated(Reviewer([]), (candidate(close=99),))
-
-
-def test_decision_id_changes_for_execution_configuration_and_is_stable_for_same_config() -> None:
-    source = snapshot(feature())
+def test_generate_returns_only_core_intents_and_decide_retains_immutable_audit() -> None:
+    reviewer = Reviewer([response(), response()])
+    subject = strategy(reviewer)
     signal, execution = times()
-    default = V1RulesLLMStrategy(Reviewer([response()]), model="model-a", atr_multiple=2)
-    changed = V1RulesLLMStrategy(Reviewer([response()]), model="model-a", atr_multiple=3)
-    repeat = V1RulesLLMStrategy(Reviewer([response()]), model="model-a", atr_multiple=2)
     kwargs = {
         "signal_time": signal,
         "earliest_execution_time": execution,
@@ -240,84 +116,327 @@ def test_decision_id_changes_for_execution_configuration_and_is_stable_for_same_
         "drawdown": 0.02,
     }
 
-    default_id = default.generate(source, (candidate(),), **kwargs)[0].intent.decision_id
-    changed_id = changed.generate(source, (candidate(),), **kwargs)[0].intent.decision_id
-    repeat_id = repeat.generate(source, (candidate(),), **kwargs)[0].intent.decision_id
+    decisions = subject.decide(snapshot(feature()), **kwargs)
+    intents = subject.generate(snapshot(feature()), **kwargs)
 
-    assert default_id != changed_id
-    assert default_id == repeat_id
+    assert all(isinstance(intent, SignalIntent) for intent in intents)
+    assert intents[0] == decisions[0].intent
+    assert decisions[0].intent.proposed_weight == decisions[0].candidate.base_weight  # type: ignore[union-attr]
+    assert decisions[0].review_outcome.review.action is ReviewAction.MAINTAIN
+    assert decisions[0].review_outcome.raw_outputs[0].text == response()
+    with pytest.raises((AttributeError, TypeError, FrozenInstanceError)):
+        decisions[0].review_outcome.failure_reason = "nope"  # type: ignore[misc]
 
 
-@pytest.mark.parametrize("label", ["m" * 201, "p" * 201])
-def test_strategy_rejects_overlong_model_or_prompt_labels_before_generation(label: str) -> None:
-    with pytest.raises(ValueError):
-        V1RulesLLMStrategy(Reviewer([]), model=label)
-    with pytest.raises(ValueError):
-        V1RulesLLMStrategy(Reviewer([]), model="m" * 200, prompt_version=label)
+def test_reduce_never_increases_target_and_reject_has_zero_weight() -> None:
+    reduced = decide(Reviewer([response("reduce", 0.4)]))[0]
+    rejected = decide(Reviewer([response("reject", 0.0)]))[0]
 
-    boundary = V1RulesLLMStrategy(
-        Reviewer([RuntimeError("provider unavailable")]), model="m" * 200, prompt_version="p" * 200
+    assert reduced.candidate is not None
+    assert reduced.intent.proposed_weight == pytest.approx(reduced.candidate.base_weight * 0.4)
+    assert reduced.intent.proposed_weight <= reduced.candidate.base_weight
+    assert rejected.intent.proposed_weight == 0
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [(response("maintain", 0.4), response()), ("not json", response())],
+)
+def test_invalid_first_output_gets_one_clean_repair(first: str, second: str) -> None:
+    reviewer = Reviewer([first, second])
+    decision = decide(reviewer)[0]
+
+    assert len(reviewer.messages) == 2
+    assert decision.review_outcome.repair_used is True
+    assert decision.review_outcome.review.action is ReviewAction.MAINTAIN
+    assert first not in reviewer.messages[1][-1].content  # type: ignore[union-attr]
+    assert "failed schema" in reviewer.messages[1][-1].content.lower()  # type: ignore[union-attr]
+
+
+def test_two_invalid_outputs_have_one_authoritative_fail_closed_state() -> None:
+    reviewer = Reviewer(["FIRST_INVALID", "SECOND_INVALID"])
+    decision = decide(reviewer)[0]
+
+    assert len(reviewer.messages) == 2
+    assert decision.failure_reason == "invalid_review"
+    assert decision.review_outcome.failure_reason == "invalid_review"
+    assert decision.review_outcome.review.action is ReviewAction.REJECT
+    assert tuple(output.text for output in decision.review_outcome.raw_outputs) == (
+        "FIRST_INVALID",
+        "SECOND_INVALID",
     )
-    signal, execution = times()
-    fallback = boundary.generate(
-        snapshot(feature()),
-        (candidate(),),
-        signal_time=signal,
-        earliest_execution_time=execution,
-        cash_weight=0.8,
-        current_weights={"AAA": 0.1},
-        drawdown=0,
-    )[0]
-
-    assert fallback.intent.prompt_version == "p" * 200
-    assert len(fallback.intent.decision_id) <= 200
+    assert decision.intent.proposed_weight == 0
+    assert "invalid_review" in decision.intent.reason_codes
 
 
-def test_time_portfolio_and_stop_validation_are_fail_closed_per_candidate() -> None:
+def test_first_unexpected_provider_failure_preserves_exact_request_key_and_is_safe() -> None:
+    sentinel = "FIRST_EXCEPTION_SENTINEL"
+    reviewer = Reviewer([RuntimeError(sentinel)])
+    row = feature()
+    candidate = rank_candidates([row])[0]
+    messages = render_review_prompt(
+        candidate, row, cash_weight=0.8, current_weight=0.1, drawdown=0.02
+    )
+    expected_key = review_cache_key("model-a", "v1", messages)
+
+    outcome = review_candidate(reviewer, messages, model="model-a", prompt_version="v1")
+
+    assert len(reviewer.messages) == 1
+    assert outcome.cache_key == expected_key
+    assert outcome.failure_reason == "provider_failure"
+    assert outcome.raw_outputs == ()
+    assert sentinel not in repr(outcome)
+    assert sentinel not in str(outcome.model_dump())
+
+
+def test_repair_failures_preserve_first_raw_and_never_retain_exception_body() -> None:
+    first = "FIRST_INVALID_BODY"
+    for error in (
+        MiniMaxError("MINIMAX_BODY", status_code=None, attempts=1),
+        RuntimeError("UNEXPECTED_BODY"),
+    ):
+        reviewer = Reviewer([first, error])
+        decision = decide(reviewer)[0]
+
+        assert len(reviewer.messages) == 2
+        assert decision.failure_reason == "repair_provider_failure"
+        assert decision.review_outcome.raw_outputs[0].text == first
+        assert decision.intent.llm_cache_key == decision.review_outcome.cache_key
+        assert "BODY" not in repr(decision)
+
+
+def test_provider_failure_is_isolated_per_candidate_in_deterministic_ticker_order() -> None:
+    rows = (feature("BBB", return_60=0.05), feature("AAA"))
+    reviewer = Reviewer([RuntimeError("BODY"), response()])
+
+    decisions = decide(
+        reviewer,
+        snapshot(*rows),
+        cash_weight=0.7,
+        current_weights={"AAA": 0.1, "BBB": 0.1},
+    )
+
+    assert [decision.intent.ticker for decision in decisions] == ["AAA", "BBB"]
+    assert decisions[0].intent.proposed_weight == 0
+    assert decisions[0].failure_reason == "provider_failure"
+    assert decisions[1].intent.proposed_weight > 0
+
+
+def test_internal_programming_failure_surfaces_instead_of_becoming_candidate_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken_prompt(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("programming defect")
+
+    monkeypatch.setattr(strategy_module, "render_review_prompt", broken_prompt)
+
+    with pytest.raises(RuntimeError, match="programming defect"):
+        decide(Reviewer([]))
+
+
+def test_dropped_holding_emits_zero_exit_without_reviewer_and_selected_holding_is_reviewed() -> (
+    None
+):
     reviewer = Reviewer([response()])
-    source = snapshot(feature())
-    signal, execution = times()
-    with pytest.raises(ValueError):
-        strategy(reviewer).generate(
-            source,
-            (candidate(),),
-            signal_time=signal.replace(tzinfo=None),
-            earliest_execution_time=execution,
-            cash_weight=0.8,
-            current_weights={},
-            drawdown=0,
-        )
-    with pytest.raises(ValueError, match="unknown"):
-        strategy(reviewer).generate(
-            source,
-            (candidate(),),
-            signal_time=signal,
-            earliest_execution_time=execution,
-            cash_weight=0.8,
-            current_weights={"ZZZ": 0.1},
-            drawdown=0,
-        )
-    with pytest.raises(ValueError, match="collision"):
-        strategy(reviewer).generate(
-            source,
-            (candidate(),),
-            signal_time=signal,
-            earliest_execution_time=execution,
-            cash_weight=0.8,
-            current_weights={"aaa": 0.1, "AAA": 0.1},
-            drawdown=0,
-        )
-    invalid_stop = generated(
-        Reviewer([response()]),
-        (candidate(close=1, atr_14=2),),
-        snapshot(feature(close=1, atr_14=2)),
+    rows = (feature("AAA"), feature("BBB", return_20=0.0, return_60=0.0))
+
+    decisions = decide(
+        reviewer,
+        snapshot(*rows),
+        cash_weight=0.8,
+        current_weights={"AAA": 0.1, "BBB": 0.1},
+    )
+
+    assert [decision.intent.ticker for decision in decisions] == ["AAA", "BBB"]
+    selected, dropped = decisions
+    assert selected.candidate is not None
+    assert json.loads(reviewer.messages[0][-1].content)["portfolio"]["current_weight"] == 0.1  # type: ignore[union-attr]
+    assert dropped.candidate is None
+    assert dropped.intent.proposed_weight == 0
+    assert dropped.failure_reason == "ineligible_exit"
+    assert dropped.review_outcome.review.action is ReviewAction.REJECT
+    assert dropped.intent.reason_codes == ("ineligible_exit",)
+    assert len(reviewer.messages) == 1
+
+
+def test_empty_selection_without_holdings_is_empty_but_holding_requires_market_row() -> None:
+    reviewer = Reviewer([])
+    source = snapshot(feature(return_20=0.0, return_60=0.0))
+
+    assert decide(reviewer, source, current_weights={}) == ()
+    assert reviewer.messages == []
+    with pytest.raises(ValueError, match="FeatureRow"):
+        decide(reviewer, source, current_weights={"ZZZ": 0.1})
+
+
+def test_zero_weight_does_not_create_an_exit() -> None:
+    reviewer = Reviewer([])
+    source = snapshot(feature(return_20=0.0, return_60=0.0))
+
+    assert decide(reviewer, source, current_weights={"AAA": 0.0}) == ()
+
+
+def test_exit_identity_includes_its_market_row_provenance() -> None:
+    first = decide(
+        Reviewer([]),
+        snapshot(feature(close=100, return_20=0.0, return_60=0.0)),
+        current_weights={"AAA": 0.1},
     )[0]
-    assert invalid_stop.intent.proposed_weight == 0
-    assert invalid_stop.intent.stop_price > 0
-    assert "invalid_stop" in invalid_stop.intent.reason_codes
+    second = decide(
+        Reviewer([]),
+        snapshot(feature(close=101, return_20=0.0, return_60=0.0)),
+        current_weights={"AAA": 0.1},
+    )[0]
+
+    assert first.intent.decision_id != second.intent.decision_id
 
 
-def test_portfolio_aggregate_is_bounded_with_only_documented_rounding_tolerance() -> None:
+def test_same_day_execution_is_rejected_and_next_date_is_accepted() -> None:
+    subject = strategy(Reviewer([response()]))
+    source = snapshot(feature())
+    signal = datetime(2025, 1, 2, 10, tzinfo=UTC)
+    kwargs = {
+        "cash_weight": 0.9,
+        "current_weights": {"AAA": 0.1},
+        "drawdown": 0,
+    }
+
+    with pytest.raises(ValueError, match="later date"):
+        subject.decide(
+            source,
+            signal_time=signal,
+            earliest_execution_time=signal + timedelta(hours=8),
+            **kwargs,
+        )
+    result = subject.decide(
+        source,
+        signal_time=signal,
+        earliest_execution_time=signal + timedelta(days=1),
+        **kwargs,
+    )
+    assert result[0].intent.earliest_execution_time.date() > source.as_of.date()
+
+
+def test_config_is_frozen_strict_and_default_stop_multiple_is_exactly_two_point_five() -> None:
+    config = V1StrategyConfig()
+
+    assert config.atr_multiple == 2.5
+    with pytest.raises(FrozenInstanceError):
+        config.atr_multiple = 3  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        strategy(Reviewer([])).config = replace(config, atr_multiple=3)  # type: ignore[misc]
+    for kwargs in (
+        {"max_candidates": True},
+        {"min_dollar_volume": float("nan")},
+        {"target_volatility": 0},
+        {"max_position_weight": 1.01},
+        {"max_gross_exposure": 0},
+        {"atr_multiple": float("inf")},
+        {"feature_version": " "},
+    ):
+        with pytest.raises(ValueError):
+            V1StrategyConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def test_every_executable_config_change_changes_full_digest_identity() -> None:
+    base = V1StrategyConfig()
+    canonical_config = json.dumps(
+        asdict(base), sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    expected_config_digest = hashlib.sha256(canonical_config.encode("utf-8")).hexdigest()
+    variations = (
+        replace(base, max_candidates=5),
+        replace(base, min_dollar_volume=10_000_000),
+        replace(base, target_volatility=0.11),
+        replace(base, max_position_weight=0.16),
+        replace(base, max_gross_exposure=0.81),
+        replace(base, atr_multiple=2.6),
+        replace(base, feature_version="technical-v2"),
+    )
+    source = snapshot(feature())
+    ids = {
+        decide(Reviewer([response()]), source, config=config)[0].intent.decision_id
+        for config in (base, *variations)
+    }
+
+    assert len(ids) == 1 + len(variations)
+    decision = decide(Reviewer([response()]), source, config=base)[0]
+    parts = decision.intent.decision_id.split(":")
+    assert len(parts[-2]) == 64
+    assert len(parts[-1]) == 64
+    assert parts[-2] == expected_config_digest
+    assert strategy(Reviewer([]), base).config_digest == expected_config_digest
+    assert parts[-1] == decision.review_outcome.cache_key
+    assert len(decision.intent.decision_id) <= 200
+
+
+def test_strategy_ranks_internally_and_revalidates_position_and_gross_caps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert "candidates" not in signature(V1RulesLLMStrategy.decide).parameters
+    assert "candidates" not in signature(V1RulesLLMStrategy.generate).parameters
+    with pytest.raises(TypeError):
+        strategy(Reviewer([])).decide(snapshot(feature()), ())  # type: ignore[misc]
+
+    forged = Candidate("AAA", 1, 0.2, 2, 100, 0.9)
+    monkeypatch.setattr(strategy_module, "rank_candidates", lambda *args, **kwargs: [forged])
+    with pytest.raises(ValueError, match="position"):
+        decide(Reviewer([]), current_weights={})
+
+    forged_a = Candidate("AAA", 1, 0.2, 2, 100, 0.1)
+    forged_b = Candidate("BBB", 1, 0.2, 2, 100, 0.1)
+    monkeypatch.setattr(
+        strategy_module, "rank_candidates", lambda *args, **kwargs: [forged_a, forged_b]
+    )
+    config = replace(V1StrategyConfig(), max_gross_exposure=0.15)
+    with pytest.raises(ValueError, match="gross"):
+        decide(
+            Reviewer([]),
+            snapshot(feature("AAA"), feature("BBB")),
+            config=config,
+            current_weights={},
+        )
+
+
+def test_invalid_stop_is_authoritative_across_outcome_decision_and_intent() -> None:
+    decision = decide(Reviewer([response()]), snapshot(feature(close=1, sma_200=0.5, atr_14=2)))[0]
+
+    assert decision.failure_reason == "invalid_stop"
+    assert decision.review_outcome.failure_reason == "invalid_stop"
+    assert decision.review_outcome.review.action is ReviewAction.REJECT
+    assert decision.intent.proposed_weight == 0
+    assert decision.intent.stop_price == 1
+    assert decision.intent.invalidation == decision.review_outcome.review.invalidation
+    assert decision.intent.invalidation != "Close below trend."
+    assert "invalid_stop" in decision.intent.reason_codes
+
+
+def test_raw_audit_is_bounded_with_complete_metadata_and_safe_normal_serialization() -> None:
+    sentinel = "RAW_OUTPUT_SENTINEL"
+    raw = sentinel + ("é" * 70_000)
+    outcome = review_candidate(
+        Reviewer([raw, response()]),
+        ({"role": "user", "content": "x"},),
+        model="model",
+        prompt_version="v1",
+    )
+    audit = outcome.raw_outputs[0]
+
+    assert audit.text.startswith(sentinel)
+    assert len(audit.text) <= MAX_AUDIT_RAW_CHARS
+    assert len(audit.text.encode("utf-8")) <= MAX_AUDIT_RAW_BYTES
+    assert audit.original_char_length == len(raw)
+    assert audit.original_utf8_byte_length == len(raw.encode("utf-8"))
+    assert audit.sha256 == hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    assert audit.truncated is True
+    assert audit.stored_char_length == len(audit.text)
+    assert audit.stored_utf8_byte_length == len(audit.text.encode("utf-8"))
+    assert sentinel not in repr(outcome)
+    assert sentinel not in str(asdict(outcome))
+    assert sentinel not in str(outcome.model_dump())
+
+
+def test_portfolio_consistency_rejects_overallocation_collisions_and_unknown_tickers() -> None:
     source = snapshot(feature("AAA"), feature("BBB"))
     signal, execution = times()
     subject = strategy(Reviewer([]))
@@ -328,48 +447,24 @@ def test_portfolio_aggregate_is_bounded_with_only_documented_rounding_tolerance(
     }
 
     with pytest.raises(ValueError, match="aggregate"):
-        subject.generate(
+        subject.decide(
             source,
-            (),
             cash_weight=0.8,
-            current_weights={"AAA": 0.9},
+            current_weights={"AAA": 0.200000000001},
             **kwargs,
         )
-    assert (
-        subject.generate(
+    with pytest.raises(ValueError, match="collision"):
+        subject.decide(
             source,
-            (),
             cash_weight=0.8,
-            current_weights={"AAA": 0.2},
+            current_weights={"aaa": 0.1, "AAA": 0.1},
             **kwargs,
         )
-        == ()
-    )
-    assert (
-        subject.generate(
+    with pytest.raises(ValueError, match="FeatureRow"):
+        subject.decide(
             source,
-            (),
-            cash_weight=0.1,
-            current_weights={"AAA": 0.2, "BBB": 0.7000000000000001},
+            cash_weight=0.8,
+            current_weights={"ZZZ": 0.1},
             **kwargs,
         )
-        == ()
-    )
-
-
-def test_empty_candidates_returns_without_calling_reviewer() -> None:
-    reviewer = Reviewer([])
-
-    assert generated(reviewer, ()) == ()
-    assert reviewer.messages == []
-
-
-def test_review_helper_bounds_raw_response_and_does_not_mutate_messages() -> None:
-    original = ({"role": "user", "content": "x"},)
-    outcome = review_candidate(
-        Reviewer(["x" * 70_000, response()]), original, model="model", prompt_version="v1"
-    )
-
-    assert len(outcome.raw_outputs[0]) <= 16_384
-    assert original == ({"role": "user", "content": "x"},)
-    assert outcome.repair_used is True
+    assert decide(Reviewer([response(), response()]), source, cash_weight=0.8) != ()
