@@ -156,3 +156,21 @@ def test_public_complete_never_copies_forged_provider_error_text(source: str) ->
     assert error.value.status_code is None
     assert error.value.attempts == 0
     client.close()
+
+
+def test_mutated_retry_state_and_forged_error_stay_sanitized() -> None:
+    forged = MiniMaxError(_BODY, status_code=500, attempts=1)
+
+    def hook(_: httpx.Request) -> None:
+        reviewer._max_retries = object()  # type: ignore[assignment]
+        raise forged
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200)),
+        event_hooks={"request": [hook]},
+    )
+    reviewer = MiniMaxReviewer(_KEY, client=client, max_retries=1)
+    with pytest.raises(MiniMaxError) as error:
+        reviewer.complete([{"role": "user", "content": "x"}])
+    _assert_sanitized_exception_graph(error.value, _KEY, _URL, _BODY)
+    client.close()

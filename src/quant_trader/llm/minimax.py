@@ -161,7 +161,7 @@ class MiniMaxReviewer:
         self.base_url = settings.base_url
         self.model = settings.model
         self.timeout_seconds = float(settings.timeout_seconds)
-        self.max_retries = settings.max_retries
+        self._max_retries = settings.max_retries
         self._sleeper = sleeper
         self._owns_client = client is None
         self.client = client or httpx.Client(timeout=self.timeout_seconds, transport=transport)
@@ -178,6 +178,10 @@ class MiniMaxReviewer:
         if self._owns_client:
             self.client.close()
 
+    @property
+    def max_retries(self) -> int:
+        return self._max_retries
+
     def complete(self, messages: Sequence[MessageInput]) -> str:
         invalid_messages = False
         invalid_message_text = "messages are invalid"
@@ -191,15 +195,16 @@ class MiniMaxReviewer:
             del messages
             raise ValueError(invalid_message_text) from SanitizedLLMCause("invalid-message")
         del messages
+        attempt_limit = self._max_retries if type(self._max_retries) is int else 0
         failed_status: int | None = None
         failed_attempts = 0
         try:
-            return self._complete_request(canonical)
+            return self._complete_request(canonical, attempt_limit)
         except MiniMaxError as error:
             if type(error) is MiniMaxError:
                 if type(error.status_code) is int and 100 <= error.status_code <= 599:
                     failed_status = error.status_code
-                if type(error.attempts) is int and 0 <= error.attempts <= self.max_retries + 1:
+                if type(error.attempts) is int and 0 <= error.attempts <= attempt_limit + 1:
                     failed_attempts = error.attempts
             _clear_traceback_frames(error)
         except Exception as error:
@@ -211,7 +216,7 @@ class MiniMaxReviewer:
             attempts=failed_attempts,
         )
 
-    def _complete_request(self, canonical: tuple[ChatMessage, ...]) -> str:
+    def _complete_request(self, canonical: tuple[ChatMessage, ...], attempt_limit: int) -> str:
         payload = {
             "max_completion_tokens": 1200,
             "messages": [message.model_dump(mode="json") for message in canonical],
@@ -220,7 +225,7 @@ class MiniMaxReviewer:
             "temperature": 0.1,
         }
         headers = _request_headers(self._credential)
-        for attempt in range(1, self.max_retries + 2):
+        for attempt in range(1, attempt_limit + 2):
             transport_failure = False
             retry_delay: float | None = None
             try:
@@ -233,7 +238,7 @@ class MiniMaxReviewer:
                     follow_redirects=False,
                 ) as response:
                     if response.status_code == 429 or 500 <= response.status_code <= 599:
-                        if self._can_retry(attempt):
+                        if attempt <= attempt_limit:
                             retry_delay = self._retry_delay(attempt, response)
                         else:
                             status_message = (
@@ -262,7 +267,7 @@ class MiniMaxReviewer:
             except httpx.TransportError:
                 transport_failure = True
             if transport_failure:
-                if self._can_retry(attempt):
+                if attempt <= attempt_limit:
                     self._sleeper(self._retry_delay(attempt, None))
                     continue
                 _raise_minimax_error(
