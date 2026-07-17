@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quant-trader"
+version = "0.1.0"
+description = "Safe daily US-equity research and paper-trading tools"
+requires-python = ">=3.12"
+dependencies = [
+  "httpx>=0.27,<1",
+  "jinja2>=3.1,<4",
+  "numpy>=2,<3",
+  "pandas>=2.2,<3",
+  "plotly>=6,<7",
+  "pyarrow>=17,<22",
+  "pydantic>=2.8,<3",
+  "pydantic-settings>=2.4,<3",
+  "pyyaml>=6,<7",
+  "typer>=0.12,<1",
+  "yfinance>=0.2.65,<1",
+]
+
+[project.scripts]
+quant-trader = "quant_trader.cli:app"
+
+[project.optional-dependencies]
+dev = ["mypy", "pytest", "pytest-cov", "respx", "ruff", "types-PyYAML"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quant_trader"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["pandas", "yfinance"]
+ignore_missing_imports = true
