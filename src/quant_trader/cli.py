@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -12,6 +13,7 @@ import typer
 from quant_trader.backtest import buy_and_hold, run_backtest
 from quant_trader.config import load_settings
 from quant_trader.data.cache import ParquetMarketCache
+from quant_trader.data.sina_source import SinaSource
 from quant_trader.data.validation import DataValidationError
 from quant_trader.data.yfinance_source import YFinanceSource
 from quant_trader.llm.minimax import MiniMaxReviewer
@@ -26,19 +28,26 @@ app.add_typer(data_app, name="data")
 app.add_typer(paper_app, name="paper")
 
 
+class MarketSource(StrEnum):
+    SINA = "sina"
+    YAHOO = "yahoo"
+
+
 @data_app.command("sync")
 def data_sync(
     config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
     start: Annotated[datetime, typer.Option(formats=["%Y-%m-%d"])],
     end: Annotated[datetime, typer.Option(formats=["%Y-%m-%d"])],
     data_root: Annotated[Path, typer.Option()] = Path("data"),
+    source: Annotated[MarketSource, typer.Option()] = MarketSource.SINA,
 ) -> None:
     """Download configured symbols into the local cache."""
     settings = load_settings(config)
-    source, cache = YFinanceSource(), ParquetMarketCache(data_root)
+    market_source = SinaSource() if source is MarketSource.SINA else YFinanceSource()
+    cache = ParquetMarketCache(data_root)
     try:
         for ticker in settings.universe:
-            cache.write(ticker, source.fetch(ticker, start.date(), end.date()))
+            cache.write(ticker, market_source.fetch(ticker, start.date(), end.date()))
             typer.echo(f"cached {ticker}")
     except DataValidationError as error:
         typer.echo(f"Error: {error}", err=True)

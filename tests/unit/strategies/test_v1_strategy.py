@@ -498,3 +498,23 @@ def test_portfolio_consistency_rejects_overallocation_collisions_and_unknown_tic
             **kwargs,
         )
     assert decide(Reviewer([response(), response()]), source, cash_weight=0.8) != ()
+
+
+def test_portfolio_consistency_accepts_machine_epsilon_rounding() -> None:
+    weights = {
+        "QQQ": 0.15083909894341532,
+        "AAPL": 0.15044861450721747,
+        "AMZN": 0.14782141588129044,
+        "GOOGL": 0.11777914146360112,
+    }
+    cash = 0.43311172920447577
+    assert cash + sum(weights.values()) == 1.0000000000000002
+
+    result = decide(
+        Reviewer([response(), response(), response(), response()]),
+        snapshot(*(feature(ticker) for ticker in weights)),
+        cash_weight=cash,
+        current_weights=weights,
+    )
+
+    assert len(result) == 4
