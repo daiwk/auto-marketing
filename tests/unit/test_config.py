@@ -11,7 +11,8 @@ def test_load_settings_uses_safe_defaults(tmp_path: Path) -> None:
 
     assert settings.paper.initial_cash == 100_000
     assert settings.llm.api_key.get_secret_value() == ""
-    assert settings.llm.base_url == "https://api.minimax.io/v1"
+    assert settings.llm.base_url == "https://api.minimaxi.com/v1"
+    assert settings.llm.model == "MiniMax-M3"
     assert isinstance(settings.paper.initial_cash, float)
 
 

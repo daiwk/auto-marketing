@@ -65,6 +65,21 @@ def test_minimax_sends_exact_request_and_does_not_mutate_messages() -> None:
     reviewer.close()
 
 
+def test_minimax_defaults_to_china_token_plan_m3() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return response("review")
+
+    reviewer = MiniMaxReviewer("secret-token", transport=httpx.MockTransport(handler))
+
+    assert reviewer.complete([{"role": "user", "content": "review"}]) == "review"
+    assert str(seen[0].url) == "https://api.minimaxi.com/v1/chat/completions"
+    assert json.loads(seen[0].content)["model"] == "MiniMax-M3"
+    reviewer.close()
+
+
 @pytest.mark.parametrize("status", [429, 500, 599])
 def test_minimax_retries_retryable_http_statuses(status: int) -> None:
     calls = 0

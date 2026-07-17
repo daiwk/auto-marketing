@@ -65,8 +65,8 @@ class ExecutionSettings(_StrictModel):
 
 class LLMSettings(_StrictModel):
     api_key: SecretStr = Field(default_factory=lambda: SecretStr(""))
-    base_url: str = "https://api.minimax.io/v1"
-    model: str = "MiniMax-M2.7"
+    base_url: str = "https://api.minimaxi.com/v1"
+    model: str = "MiniMax-M3"
     prompt_version: str = "v1"
     timeout_seconds: StrictNumber = Field(default=30, gt=0)
     max_retries: StrictInteger = Field(default=2, ge=0, le=5)
