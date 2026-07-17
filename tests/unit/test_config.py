@@ -12,6 +12,7 @@ def test_load_settings_uses_safe_defaults(tmp_path: Path) -> None:
     assert settings.paper.initial_cash == 100_000
     assert settings.llm.api_key.get_secret_value() == ""
     assert settings.llm.base_url == "https://api.minimax.io/v1"
+    assert isinstance(settings.paper.initial_cash, float)
 
 
 def test_explicit_minimax_environment_variables_override_yaml(
@@ -74,6 +75,34 @@ def test_settings_validates_llm_endpoint_and_labels(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://exa mple.com",
+        "https://example..com",
+        "https://example.com:invalid",
+        "https://user:password@example.com",
+        "https://example.com?debug=true",
+        "https://example.com#fragment",
+    ],
+)
+def test_settings_rejects_unsafe_or_malformed_llm_base_urls(
+    tmp_path: Path, base_url: str
+) -> None:
+    config = tmp_path / "settings.yaml"
+    config.write_text(f"llm:\n  base_url: {base_url}\n")
+
+    with pytest.raises(ValidationError):
+        load_settings(config)
+
+
+def test_settings_normalizes_llm_base_url_without_trailing_slash(tmp_path: Path) -> None:
+    config = tmp_path / "settings.yaml"
+    config.write_text("llm:\n  base_url: https://api.example.com/v1/\n")
+
+    assert load_settings(config).llm.base_url == "https://api.example.com/v1"
+
+
+@pytest.mark.parametrize(
     "yaml_body",
     [
         "paper:\n  initial_cash: '100000'\n",
@@ -105,6 +134,18 @@ def test_settings_accepts_yaml_integer_values_for_float_thresholds(tmp_path: Pat
 
     assert settings.paper.initial_cash == 100_000
     assert settings.strategy.min_average_dollar_volume == 20_000_000
+
+
+@pytest.mark.parametrize(
+    "yaml_body",
+    ["paper:\n  initial_cash: .inf\n", "execution:\n  slippage_bps: .nan\n"],
+)
+def test_settings_rejects_non_finite_numeric_yaml_values(tmp_path: Path, yaml_body: str) -> None:
+    config = tmp_path / "settings.yaml"
+    config.write_text(yaml_body)
+
+    with pytest.raises(ValidationError):
+        load_settings(config)
 
 
 def test_settings_uses_shared_ticker_validation_for_universe(tmp_path: Path) -> None:

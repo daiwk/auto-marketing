@@ -3,18 +3,32 @@
 from __future__ import annotations
 
 import os
+import re
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    SecretStr,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from quant_trader.validation import StrictInteger, StrictNumber, USEquityTicker
 
+_HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
+_HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+
 
 class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_default=True)
 
 
 class PaperSettings(_StrictModel):
@@ -60,13 +74,23 @@ class LLMSettings(_StrictModel):
     @field_validator("base_url", mode="before")
     @classmethod
     def validate_base_url(cls, value: Any) -> str:
-        if not isinstance(value, str):
+        if not isinstance(value, str) or value != value.strip() or not value:
             raise ValueError("base_url must be a nonblank http or https URL")
-        normalized = value.strip()
-        parsed = urlparse(normalized)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        try:
+            parsed = _HTTP_URL_ADAPTER.validate_python(value)
+        except ValidationError as error:
+            raise ValueError("base_url must be a nonblank http or https URL") from error
+        host = parsed.host
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query is not None
+            or parsed.fragment is not None
+            or not _is_valid_hostname(host)
+        ):
             raise ValueError("base_url must be a nonblank http or https URL")
-        return normalized
+        return str(parsed).rstrip("/")
 
     @field_validator("model", "prompt_version", mode="before")
     @classmethod
@@ -74,6 +98,20 @@ class LLMSettings(_StrictModel):
         if not isinstance(value, str) or not (normalized := value.strip()):
             raise ValueError("value must be a nonempty string")
         return normalized
+
+
+def _is_valid_hostname(host: str | None) -> bool:
+    if host is None:
+        return False
+    try:
+        ip_address(host)
+    except ValueError:
+        return (
+            len(host) <= 253
+            and not host.endswith(".")
+            and all(_HOST_LABEL.fullmatch(label) is not None for label in host.split("."))
+        )
+    return True
 
 
 class Settings(_StrictModel):

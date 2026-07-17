@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from math import isfinite
 from typing import Annotated, Any
 
 from pydantic import BeforeValidator, StringConstraints
@@ -10,6 +11,8 @@ from pydantic import BeforeValidator, StringConstraints
 def _require_number(value: Any) -> int | float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError("value must be a numeric JSON/YAML scalar, not a boolean or string")
+    if not isfinite(value):
+        raise ValueError("value must be finite")
     return value
 
 

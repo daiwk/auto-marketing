@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, timedelta
+from math import inf, nan
 
 import pytest
 from pydantic import ValidationError
@@ -39,6 +40,22 @@ def test_llm_review_rejects_boolean_and_numeric_string_scores(field_name: str) -
     for malformed_value in (True, "0.5"):
         with pytest.raises(ValidationError):
             LLMReview(**(payload | {field_name: malformed_value}))
+
+
+@pytest.mark.parametrize("field_name, value", [("weight_multiplier", inf), ("confidence", nan)])
+def test_llm_review_rejects_non_finite_scores(field_name: str, value: float) -> None:
+    payload = {
+        "action": ReviewAction.MAINTAIN,
+        "weight_multiplier": 0.5,
+        "confidence": 0.8,
+        "thesis": "A sufficiently specific thesis.",
+        "risks": ["Market risk"],
+        "invalidation": "The thesis no longer holds.",
+        "input_anomalies": [],
+    }
+
+    with pytest.raises(ValidationError):
+        LLMReview(**(payload | {field_name: value}))
 
 
 def test_llm_review_accepts_input_anomalies_and_rejects_legacy_anomalies() -> None:
@@ -152,6 +169,28 @@ def test_signal_intent_rejects_boolean_and_numeric_string_safety_values(field_na
             SignalIntent(**(payload | {field_name: malformed_value}))
 
 
+@pytest.mark.parametrize("field_name, value", [("proposed_weight", nan), ("stop_price", inf)])
+def test_signal_intent_rejects_non_finite_safety_values(field_name: str, value: float) -> None:
+    now = datetime(2026, 1, 2, 10, 0, tzinfo=UTC)
+    payload = {
+        "decision_id": "decision-1",
+        "ticker": "SPY",
+        "side": "buy",
+        "proposed_weight": 0.1,
+        "signal_time": now,
+        "earliest_execution_time": now + timedelta(minutes=1),
+        "stop_price": 100,
+        "invalidation": "Price falls below support.",
+        "reason_codes": ["momentum"],
+        "strategy_version": "v1",
+        "prompt_version": "v1",
+        "llm_cache_key": "cache-1",
+    }
+
+    with pytest.raises(ValidationError):
+        SignalIntent(**(payload | {field_name: value}))
+
+
 @pytest.mark.parametrize("ticker", ["brk.b", "bf-b", "MSFT"])
 def test_shared_ticker_contract_normalizes_valid_us_equity_symbols(ticker: str) -> None:
     order = ApprovedOrder(
@@ -190,6 +229,17 @@ def test_approved_order_rejects_boolean_and_numeric_string_target_weight() -> No
     for malformed_value in (True, "0.1"):
         with pytest.raises(ValidationError):
             ApprovedOrder(**(payload | {"target_weight": malformed_value}))
+
+
+def test_approved_order_rejects_non_finite_target_weight() -> None:
+    with pytest.raises(ValidationError):
+        ApprovedOrder(
+            decision_id="decision-1",
+            ticker="SPY",
+            target_weight=nan,
+            execution_date=date(2026, 1, 2),
+            reason_codes=["momentum"],
+        )
 
 
 def test_contracts_are_immutable() -> None:
