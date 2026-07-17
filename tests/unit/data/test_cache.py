@@ -39,6 +39,15 @@ def test_cache_rejects_corrupt_metadata(tmp_path) -> None:
         cache.read("SPY")
 
 
+def test_cache_rejects_invalid_utf8_metadata(tmp_path) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    cache.write("SPY", ohlcv())
+    (tmp_path / "market" / "SPY.json").write_bytes(b"\xff\xfe")
+    with pytest.raises(CacheError, match="SPY.*metadata") as error:
+        cache.read("SPY")
+    assert isinstance(error.value.__cause__, UnicodeDecodeError)
+
+
 def test_cache_requires_data_file_when_metadata_exists(tmp_path) -> None:
     cache = ParquetMarketCache(tmp_path)
     cache.write("SPY", ohlcv())

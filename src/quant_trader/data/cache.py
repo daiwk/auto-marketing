@@ -81,7 +81,7 @@ class ParquetMarketCache:
             raise CacheError(f"{normalized_ticker}: cache metadata is missing")
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise CacheError(f"{normalized_ticker}: corrupt cache metadata") from error
         if not isinstance(metadata, dict):
             raise CacheError(f"{normalized_ticker}: corrupt cache metadata")
