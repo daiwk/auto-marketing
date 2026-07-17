@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from math import hypot, isfinite
+from math import fsum, hypot, isfinite, nextafter
 
 from quant_trader.data.validation import normalize_ticker
 from quant_trader.features.snapshot import FeatureRow
@@ -84,7 +84,23 @@ def _eligible(row: FeatureRow, min_dollar_volume: float) -> bool:
 
 
 def _score(row: FeatureRow) -> float:
-    score = (0.2 * row.return_20 + 0.5 * row.return_60 + 0.3 * row.return_120) / row.volatility_20
+    magnitude = max(
+        abs(row.return_20),
+        abs(row.return_60),
+        abs(row.return_120),
+        abs(row.volatility_20),
+    )
+    normalized_volatility = row.volatility_20 / magnitude
+    if not isfinite(normalized_volatility) or normalized_volatility <= 0:
+        raise ValueError(f"{row.ticker}: derived score is unrepresentable")
+    normalized_momentum = fsum(
+        (
+            0.2 * (row.return_20 / magnitude),
+            0.5 * (row.return_60 / magnitude),
+            0.3 * (row.return_120 / magnitude),
+        )
+    )
+    score = normalized_momentum / normalized_volatility
     if not isfinite(score):
         raise ValueError(f"{row.ticker}: derived score must be finite")
     return score
@@ -139,6 +155,15 @@ def rank_candidates(
         scale = target / portfolio_volatility
         weights = [weight * scale for weight in weights]
     weights = [min(weight, position_cap) for weight in weights]
+    gross_exposure = fsum(weights)
+    if not isfinite(gross_exposure) or gross_exposure < 0:
+        raise ValueError("derived gross exposure must be finite and nonnegative")
+    if gross_exposure > gross_cap:
+        safety_cap = nextafter(gross_cap, 0.0)
+        weights = [weight * safety_cap / gross_exposure for weight in weights]
+        gross_exposure = fsum(weights)
+    if gross_exposure > gross_cap:
+        raise ValueError("derived gross exposure exceeds its limit")
     if not all(isfinite(weight) and 0 <= weight <= gross_cap for weight in weights):
         raise ValueError("derived candidate weights must be finite and within gross exposure")
     return [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from inspect import signature
+from math import fsum
 from sys import float_info
 
 import pytest
@@ -192,14 +193,41 @@ def test_flat_market_feature_row_is_valid_but_ineligible() -> None:
     assert rank_candidates([flat]) == []
 
 
-def test_smallest_positive_subnormal_volatility_is_rejected_with_domain_error() -> None:
-    with pytest.raises(ValueError, match="derived score"):
-        rank_candidates(
-            [
-                row("AAA", volatility_20=float.fromhex("0x0.0000000000001p-1022")),
-                row("BBB", volatility_20=float.fromhex("0x0.0000000000001p-1022")),
-            ]
-        )
+def test_smallest_positive_subnormal_score_is_scale_invariant() -> None:
+    smallest = float_info.min * float_info.epsilon
+    result = rank_candidates(
+        [
+            row(
+                "AAA",
+                return_20=smallest,
+                return_60=smallest,
+                return_120=smallest,
+                volatility_20=smallest,
+            )
+        ]
+    )
+
+    assert result[0].score == pytest.approx(1.0)
+
+
+def test_common_feature_scaling_does_not_change_score() -> None:
+    base = 0.001
+    first = rank_candidates(
+        [row("AAA", return_20=base, return_60=base, return_120=base, volatility_20=base)]
+    )
+    second = rank_candidates(
+        [
+            row(
+                "AAA",
+                return_20=base * 100,
+                return_60=base * 100,
+                return_120=base * 100,
+                volatility_20=base * 100,
+            )
+        ]
+    )
+
+    assert first[0].score == pytest.approx(second[0].score)
 
 
 def test_max_finite_volatility_never_overflows() -> None:
@@ -215,3 +243,18 @@ def test_max_finite_volatility_never_overflows() -> None:
 def test_extreme_finite_momentum_is_rejected_before_candidate_construction() -> None:
     with pytest.raises(ValueError, match="score"):
         rank_candidates([row(return_20=float_info.max, volatility_20=0.1)])
+
+
+def test_rounding_above_gross_limit_is_scaled_down() -> None:
+    result = rank_candidates(
+        [
+            row("AAA", volatility_20=0.1),
+            row("BBB", volatility_20=0.1),
+            row("CCC", volatility_20=0.13),
+            row("DDD", volatility_20=1.1),
+        ],
+        max_position_weight=0.9,
+        target_volatility=float_info.max,
+    )
+
+    assert fsum(candidate.base_weight for candidate in result) <= 0.8
