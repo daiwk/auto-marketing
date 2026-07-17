@@ -19,6 +19,7 @@ from quant_trader.llm.base import ChatMessage, MessageInput, SanitizedLLMCause, 
 _MAX_RETRY_AFTER_SECONDS = 60.0
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_COMPLETION_CHARS = 16 * 1024
+_INTERNAL_ERROR_ORIGIN = object()
 
 
 class _Credential:
@@ -41,17 +42,30 @@ class _Credential:
 class MiniMaxError(RuntimeError):
     """A safe provider failure that excludes response bodies and credentials."""
 
-    def __init__(self, message: str, *, status_code: int | None, attempts: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None,
+        attempts: int,
+        _origin: object | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.attempts = attempts
+        self._origin = _origin
 
 
 def _raise_minimax_error(
     message: str, category: str, *, status_code: int | None, attempts: int
 ) -> NoReturn:
     cause = SanitizedLLMCause(category, status_code=status_code, attempts=attempts)
-    raise MiniMaxError(message, status_code=status_code, attempts=attempts) from cause
+    raise MiniMaxError(
+        message,
+        status_code=status_code,
+        attempts=attempts,
+        _origin=_INTERNAL_ERROR_ORIGIN,
+    ) from cause
 
 
 def _request_headers(credential: _Credential) -> dict[str, str]:
@@ -136,6 +150,7 @@ class MiniMaxReviewer:
                 attempts=0,
             )
         if not callable(sleeper):
+            del sleeper, client, transport
             _raise_minimax_error(
                 "MiniMax connection settings are invalid",
                 "invalid-sleeper",
@@ -143,6 +158,7 @@ class MiniMaxReviewer:
                 attempts=0,
             )
         if client is not None and transport is not None:
+            del sleeper, client, transport
             _raise_minimax_error(
                 "MiniMax connection settings are invalid",
                 "conflicting-client-options",
@@ -150,6 +166,7 @@ class MiniMaxReviewer:
                 attempts=0,
             )
         if client is not None and not isinstance(client, httpx.Client):
+            del sleeper, client, transport
             _raise_minimax_error(
                 "MiniMax connection settings are invalid",
                 "invalid-client",
@@ -201,7 +218,7 @@ class MiniMaxReviewer:
         try:
             return self._complete_request(canonical, attempt_limit)
         except MiniMaxError as error:
-            if type(error) is MiniMaxError:
+            if type(error) is MiniMaxError and error._origin is _INTERNAL_ERROR_ORIGIN:
                 if type(error.status_code) is int and 100 <= error.status_code <= 599:
                     failed_status = error.status_code
                 if type(error.attempts) is int and 0 <= error.attempts <= attempt_limit + 1:
@@ -209,6 +226,7 @@ class MiniMaxReviewer:
             _clear_traceback_frames(error)
         except Exception as error:
             _clear_traceback_frames(error)
+        self._max_retries = attempt_limit
         _raise_minimax_error(
             "MiniMax request failed safely",
             "provider-failure",
