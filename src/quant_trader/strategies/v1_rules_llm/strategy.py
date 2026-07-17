@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
-from math import isfinite
+from math import fsum, isfinite
 from sys import float_info
 from typing import cast
 
@@ -35,6 +35,8 @@ _REPAIR_INSTRUCTION = (
 )
 _GENERIC_THESIS = "No valid review was accepted."
 _GENERIC_INVALIDATION = "No position without a valid review."
+# This accepts only insignificant binary floating-point noise around a fully invested portfolio.
+_PORTFOLIO_SUM_TOLERANCE = 1e-12
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +62,8 @@ class StrategyDecision:
 
 
 def _label(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
-        raise ValueError(f"{name} must be a nonblank string without surrounding whitespace")
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 200:
+        raise ValueError(f"{name} must be a nonblank string of at most 200 characters")
     return value
 
 
@@ -163,6 +165,15 @@ def review_candidate(
     try:
         repaired = reviewer.complete(repair_messages)
     except (MiniMaxError, SanitizedLLMCause, ValueError):
+        return _outcome(
+            ticker,
+            _synthetic_reject("repair_provider_failure"),
+            first_raw,
+            cache_key,
+            True,
+            "repair_provider_failure",
+        )
+    except Exception:
         return _outcome(
             ticker,
             _synthetic_reject("repair_provider_failure"),
@@ -278,10 +289,20 @@ class V1RulesLLMStrategy:
             return stop, False
         return max(float_info.min, candidate.close * 0.5), True
 
+    def _decision_config_hash(self) -> str:
+        payload = {
+            "atr_multiple": self.atr_multiple,
+            "model": self.model,
+            "prompt_version": self.prompt_version,
+            "strategy_version": self.version,
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
     def _decision_id(self, ticker: str, snapshot: FeatureSnapshot, cache_key: str) -> str:
         return (
             f"{self.version}:{ticker}:{snapshot.as_of:%Y%m%d}:"
-            f"{self.prompt_version}:{cache_key[:24]}"
+            f"{self._decision_config_hash()[:24]}:{cache_key[:24]}"
         )
 
     def _failed_decision(
@@ -332,6 +353,9 @@ class V1RulesLLMStrategy:
         cash = _unit_weight(cash_weight, "cash_weight")
         drawdown_value = _unit_weight(drawdown, "drawdown")
         weights = self._validated_current_weights(current_weights, snapshot)
+        occupied_weight = fsum([cash, *(weights[ticker] for ticker in sorted(weights))])
+        if occupied_weight > 1.0 + _PORTFOLIO_SUM_TOLERANCE:
+            raise ValueError("portfolio aggregate weight must not exceed 1")
         canonical_candidates = self._validated_candidates(snapshot, candidates)
         decisions: list[StrategyDecision] = []
         for candidate in canonical_candidates:

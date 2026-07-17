@@ -169,6 +169,19 @@ def test_repair_provider_error_and_unexpected_reviewer_error_are_safe() -> None:
     assert "BODY" not in str(unexpected)
 
 
+def test_unexpected_repair_error_is_sanitized_after_preserving_first_raw_output() -> None:
+    first = "FIRST_INVALID_BODY"
+    reviewer = Reviewer([first, RuntimeError("EXCEPTION_BODY")])
+    decision = generated(reviewer)[0]
+
+    assert len(reviewer.messages) == 2
+    assert decision.review_outcome.repair_used is True
+    assert decision.review_outcome.failure_reason == "repair_provider_failure"
+    assert decision.review_outcome.raw_outputs == (first,)
+    assert decision.intent.llm_cache_key == decision.review_outcome.cache_key
+    assert "EXCEPTION_BODY" not in str(decision)
+
+
 def test_review_helper_leaves_unexpected_errors_to_the_public_strategy_boundary() -> None:
     with pytest.raises(RuntimeError, match="BODY"):
         review_candidate(
@@ -213,6 +226,53 @@ def test_input_validation_ordering_ids_and_cache_are_deterministic() -> None:
         generated(Reviewer([]), (candidate(close=99),))
 
 
+def test_decision_id_changes_for_execution_configuration_and_is_stable_for_same_config() -> None:
+    source = snapshot(feature())
+    signal, execution = times()
+    default = V1RulesLLMStrategy(Reviewer([response()]), model="model-a", atr_multiple=2)
+    changed = V1RulesLLMStrategy(Reviewer([response()]), model="model-a", atr_multiple=3)
+    repeat = V1RulesLLMStrategy(Reviewer([response()]), model="model-a", atr_multiple=2)
+    kwargs = {
+        "signal_time": signal,
+        "earliest_execution_time": execution,
+        "cash_weight": 0.8,
+        "current_weights": {"AAA": 0.1},
+        "drawdown": 0.02,
+    }
+
+    default_id = default.generate(source, (candidate(),), **kwargs)[0].intent.decision_id
+    changed_id = changed.generate(source, (candidate(),), **kwargs)[0].intent.decision_id
+    repeat_id = repeat.generate(source, (candidate(),), **kwargs)[0].intent.decision_id
+
+    assert default_id != changed_id
+    assert default_id == repeat_id
+
+
+@pytest.mark.parametrize("label", ["m" * 201, "p" * 201])
+def test_strategy_rejects_overlong_model_or_prompt_labels_before_generation(label: str) -> None:
+    with pytest.raises(ValueError):
+        V1RulesLLMStrategy(Reviewer([]), model=label)
+    with pytest.raises(ValueError):
+        V1RulesLLMStrategy(Reviewer([]), model="m" * 200, prompt_version=label)
+
+    boundary = V1RulesLLMStrategy(
+        Reviewer([RuntimeError("provider unavailable")]), model="m" * 200, prompt_version="p" * 200
+    )
+    signal, execution = times()
+    fallback = boundary.generate(
+        snapshot(feature()),
+        (candidate(),),
+        signal_time=signal,
+        earliest_execution_time=execution,
+        cash_weight=0.8,
+        current_weights={"AAA": 0.1},
+        drawdown=0,
+    )[0]
+
+    assert fallback.intent.prompt_version == "p" * 200
+    assert len(fallback.intent.decision_id) <= 200
+
+
 def test_time_portfolio_and_stop_validation_are_fail_closed_per_candidate() -> None:
     reviewer = Reviewer([response()])
     source = snapshot(feature())
@@ -255,6 +315,53 @@ def test_time_portfolio_and_stop_validation_are_fail_closed_per_candidate() -> N
     assert invalid_stop.intent.proposed_weight == 0
     assert invalid_stop.intent.stop_price > 0
     assert "invalid_stop" in invalid_stop.intent.reason_codes
+
+
+def test_portfolio_aggregate_is_bounded_with_only_documented_rounding_tolerance() -> None:
+    source = snapshot(feature("AAA"), feature("BBB"))
+    signal, execution = times()
+    subject = strategy(Reviewer([]))
+    kwargs = {
+        "signal_time": signal,
+        "earliest_execution_time": execution,
+        "drawdown": 0,
+    }
+
+    with pytest.raises(ValueError, match="aggregate"):
+        subject.generate(
+            source,
+            (),
+            cash_weight=0.8,
+            current_weights={"AAA": 0.9},
+            **kwargs,
+        )
+    assert (
+        subject.generate(
+            source,
+            (),
+            cash_weight=0.8,
+            current_weights={"AAA": 0.2},
+            **kwargs,
+        )
+        == ()
+    )
+    assert (
+        subject.generate(
+            source,
+            (),
+            cash_weight=0.1,
+            current_weights={"AAA": 0.2, "BBB": 0.7000000000000001},
+            **kwargs,
+        )
+        == ()
+    )
+
+
+def test_empty_candidates_returns_without_calling_reviewer() -> None:
+    reviewer = Reviewer([])
+
+    assert generated(reviewer, ()) == ()
+    assert reviewer.messages == []
 
 
 def test_review_helper_bounds_raw_response_and_does_not_mutate_messages() -> None:
