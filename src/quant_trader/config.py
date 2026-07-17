@@ -116,7 +116,15 @@ def _is_valid_hostname(host: str | None) -> bool:
 
 class Settings(_StrictModel):
     universe: tuple[USEquityTicker, ...] = (
-        "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"
+        "SPY",
+        "QQQ",
+        "IWM",
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "AMZN",
+        "GOOGL",
+        "META",
     )
     paper: PaperSettings = Field(default_factory=PaperSettings)
     strategy: StrategySettings = Field(default_factory=StrategySettings)

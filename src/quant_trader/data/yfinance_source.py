@@ -45,7 +45,10 @@ class YFinanceSource:
                 index = index.tz_localize(None)
             frame.index = index.normalize()
             frame.index.name = "date"
-            return validate_ohlcv(frame, normalized_ticker)
+            canonical = validate_ohlcv(frame, normalized_ticker)
+            if any(market_date < start or market_date >= end for market_date in canonical.index.date):
+                raise DataValidationError(f"{normalized_ticker}: bars outside requested interval [{start}, {end})")
+            return canonical
         except (DataValidationError, KeyError, TypeError, ValueError) as error:
             raise DataValidationError(
                 f"{normalized_ticker}: invalid response for {start} to {end}: {error}"

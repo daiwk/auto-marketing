@@ -9,21 +9,80 @@ from quant_trader.data.cache import CacheError, ParquetMarketCache
 
 def ohlcv() -> pd.DataFrame:
     return pd.DataFrame(
-        {"open": [100.0, 101.0], "high": [102.0, 103.0], "low": [99.0, 100.0], "close": [101.0, 102.0], "volume": [10.0, 20.0]},
+        {
+            "open": [100.0, 101.0],
+            "high": [102.0, 103.0],
+            "low": [99.0, 100.0],
+            "close": [101.0, 102.0],
+            "volume": [10.0, 20.0],
+        },
         index=pd.DatetimeIndex(["2026-01-02", "2026-01-05"], name="date"),
     )
 
 
-def test_cache_round_trip_metadata_and_defensive_reads(tmp_path) -> None:
+def metadata_path(tmp_path) -> object:
+    return tmp_path / "market" / "SPY.json"
+
+
+def test_cache_round_trip_uses_immutable_generation_and_defensive_reads(tmp_path) -> None:
     cache = ParquetMarketCache(tmp_path)
-    frame = ohlcv()
-    cache.write("spy", frame, retrieved_at=datetime(2026, 1, 6, tzinfo=UTC))
+    cache.write("spy", ohlcv(), retrieved_at=datetime(2026, 1, 6, tzinfo=UTC))
     loaded = cache.read("SPY")
     metadata = cache.read_metadata("SPY")
     loaded.loc[loaded.index[0], "close"] = 999.0
     assert cache.read("SPY").iloc[0]["close"] == 101.0
-    assert metadata == {"ticker": "SPY", "retrieved_at": "2026-01-06T00:00:00+00:00", "max_market_date": "2026-01-05", "row_count": 2, "schema_version": 1}
+    assert metadata | {"generation": metadata["generation"], "data_file": metadata["data_file"], "sha256": metadata["sha256"]} == metadata
+    assert metadata["data_file"] == cache.path_for("SPY").name
+    assert cache.path_for("SPY").name.startswith("SPY.")
+    assert cache.path_for("SPY").suffix == ".parquet"
     assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_cache_failed_generation_write_preserves_previous_manifest(tmp_path, monkeypatch) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    cache.write("SPY", ohlcv())
+    old_metadata = cache.read_metadata("SPY")
+    old_data = cache.read("SPY")
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(CacheError, match="failed to write") as error:
+        cache.write("SPY", ohlcv())
+    assert isinstance(error.value.__cause__, OSError)
+    assert cache.read_metadata("SPY") == old_metadata
+    pd.testing.assert_frame_equal(cache.read("SPY"), old_data)
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_cache_rejects_digest_mismatch(tmp_path) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    cache.write("SPY", ohlcv())
+    cache.path_for("SPY").write_bytes(b"not parquet")
+    with pytest.raises(CacheError, match="digest"):
+        cache.read("SPY")
+
+
+def test_cache_rejects_manifest_data_file_traversal(tmp_path) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    cache.write("SPY", ohlcv())
+    path = metadata_path(tmp_path)
+    metadata = json.loads(path.read_text())
+    metadata["data_file"] = "../outside.parquet"
+    path.write_text(json.dumps(metadata))
+    with pytest.raises(CacheError, match="data file"):
+        cache.read("SPY")
+
+
+def test_cache_rejects_same_shape_data_with_stale_metadata(tmp_path) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    cache.write("SPY", ohlcv())
+    frame = ohlcv()
+    frame.index = pd.DatetimeIndex(["2026-01-05", "2026-01-06"], name="date")
+    cache.write("SPY", frame)
+    path = metadata_path(tmp_path)
+    metadata = json.loads(path.read_text())
+    metadata["max_market_date"] = "2026-01-05"
+    path.write_text(json.dumps(metadata))
+    with pytest.raises(CacheError, match="max market date"):
+        cache.read("SPY")
 
 
 def test_cache_rejects_traversal_ticker(tmp_path) -> None:
@@ -34,7 +93,7 @@ def test_cache_rejects_traversal_ticker(tmp_path) -> None:
 def test_cache_rejects_corrupt_metadata(tmp_path) -> None:
     cache = ParquetMarketCache(tmp_path)
     cache.write("SPY", ohlcv())
-    (tmp_path / "market" / "SPY.json").write_text("not json")
+    metadata_path(tmp_path).write_text("not json")
     with pytest.raises(CacheError, match="metadata"):
         cache.read("SPY")
 
@@ -42,44 +101,25 @@ def test_cache_rejects_corrupt_metadata(tmp_path) -> None:
 def test_cache_rejects_invalid_utf8_metadata(tmp_path) -> None:
     cache = ParquetMarketCache(tmp_path)
     cache.write("SPY", ohlcv())
-    (tmp_path / "market" / "SPY.json").write_bytes(b"\xff\xfe")
+    metadata_path(tmp_path).write_bytes(b"\xff\xfe")
     with pytest.raises(CacheError, match="SPY.*metadata") as error:
         cache.read("SPY")
     assert isinstance(error.value.__cause__, UnicodeDecodeError)
 
 
-def test_cache_requires_data_file_when_metadata_exists(tmp_path) -> None:
+def test_cache_requires_data_file_when_manifest_exists(tmp_path) -> None:
     cache = ParquetMarketCache(tmp_path)
     cache.write("SPY", ohlcv())
-    (tmp_path / "market" / "SPY.parquet").unlink()
+    cache.path_for("SPY").unlink()
     with pytest.raises(CacheError, match="data is missing"):
         cache.read("SPY")
 
 
-def test_cache_requires_metadata_file_when_data_exists(tmp_path) -> None:
+def test_cache_requires_manifest_when_generation_exists(tmp_path) -> None:
     cache = ParquetMarketCache(tmp_path)
     cache.write("SPY", ohlcv())
-    (tmp_path / "market" / "SPY.json").unlink()
+    metadata_path(tmp_path).unlink()
     with pytest.raises(CacheError, match="metadata is missing"):
-        cache.read("SPY")
-
-
-def test_cache_rejects_corrupt_parquet(tmp_path) -> None:
-    cache = ParquetMarketCache(tmp_path)
-    cache.write("SPY", ohlcv())
-    (tmp_path / "market" / "SPY.parquet").write_bytes(b"not parquet")
-    with pytest.raises(CacheError, match="corrupt cache data"):
-        cache.read("SPY")
-
-
-def test_cache_rejects_non_utc_retrieval_metadata(tmp_path) -> None:
-    cache = ParquetMarketCache(tmp_path)
-    cache.write("SPY", ohlcv())
-    path = tmp_path / "market" / "SPY.json"
-    metadata = json.loads(path.read_text())
-    metadata["retrieved_at"] = "2026-01-06T08:00:00+08:00"
-    path.write_text(json.dumps(metadata))
-    with pytest.raises(CacheError, match="metadata"):
         cache.read("SPY")
 
 
@@ -95,24 +135,9 @@ def test_cache_rejects_non_utc_retrieval_metadata(tmp_path) -> None:
 def test_cache_rejects_noncanonical_metadata_types(tmp_path, key: str, value: object) -> None:
     cache = ParquetMarketCache(tmp_path)
     cache.write("SPY", ohlcv())
-    path = tmp_path / "market" / "SPY.json"
+    path = metadata_path(tmp_path)
     metadata = json.loads(path.read_text())
     metadata[key] = value
     path.write_text(json.dumps(metadata))
     with pytest.raises(CacheError, match="metadata|schema"):
-        cache.read("SPY")
-
-
-@pytest.mark.parametrize(
-    "key, value, match",
-    [("row_count", 3, "row count"), ("max_market_date", "2026-01-06", "max market date")],
-)
-def test_cache_rejects_mismatched_metadata(tmp_path, key: str, value: object, match: str) -> None:
-    cache = ParquetMarketCache(tmp_path)
-    cache.write("SPY", ohlcv())
-    path = tmp_path / "market" / "SPY.json"
-    metadata = json.loads(path.read_text())
-    metadata[key] = value
-    path.write_text(json.dumps(metadata))
-    with pytest.raises(CacheError, match=match):
         cache.read("SPY")

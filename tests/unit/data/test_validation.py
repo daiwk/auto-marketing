@@ -51,6 +51,12 @@ def test_validate_ohlcv_rejects_large_adjusted_close_jump() -> None:
         validate_ohlcv(frame, "SPY")
 
 
+@pytest.mark.parametrize("ratio", [True, "10", np.nan, np.inf, -np.inf, 1.0, 0.0])
+def test_validate_ohlcv_rejects_invalid_close_jump_ratio(ratio: object) -> None:
+    with pytest.raises((DataValidationError, ValueError), match="max_close_ratio"):
+        validate_ohlcv(ohlcv(), "SPY", max_close_ratio=ratio)  # type: ignore[arg-type]
+
+
 def test_validate_ohlcv_uses_shared_ticker_validation() -> None:
     with pytest.raises(DataValidationError, match="ticker"):
         validate_ohlcv(ohlcv(), "../SPY")

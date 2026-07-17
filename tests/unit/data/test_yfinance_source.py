@@ -87,3 +87,13 @@ def test_fetch_wraps_non_convertible_index(monkeypatch) -> None:
     monkeypatch.setattr("yfinance.download", lambda *args, **kwargs: frame)
     with pytest.raises(DataValidationError, match="SPY.*invalid response.*2026-01-02"):
         YFinanceSource().fetch("SPY", date(2026, 1, 2), date(2026, 1, 6))
+
+
+@pytest.mark.parametrize("market_date", ["2026-01-01", "2026-01-06"])
+def test_fetch_rejects_bars_outside_requested_half_open_interval(monkeypatch, market_date: str) -> None:
+    frame = raw_frame()
+    frame.index = pd.DatetimeIndex([market_date, "2026-01-05"])
+    frame = frame.sort_index()
+    monkeypatch.setattr("yfinance.download", lambda *args, **kwargs: frame)
+    with pytest.raises(DataValidationError, match="SPY.*outside requested interval.*2026-01-02.*2026-01-06"):
+        YFinanceSource().fetch("SPY", date(2026, 1, 2), date(2026, 1, 6))

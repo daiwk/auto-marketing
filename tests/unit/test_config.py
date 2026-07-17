@@ -85,9 +85,7 @@ def test_settings_validates_llm_endpoint_and_labels(tmp_path: Path) -> None:
         "https://example.com#fragment",
     ],
 )
-def test_settings_rejects_unsafe_or_malformed_llm_base_urls(
-    tmp_path: Path, base_url: str
-) -> None:
+def test_settings_rejects_unsafe_or_malformed_llm_base_urls(tmp_path: Path, base_url: str) -> None:
     config = tmp_path / "settings.yaml"
     config.write_text(f"llm:\n  base_url: {base_url}\n")
 
@@ -126,8 +124,7 @@ def test_settings_rejects_boolean_and_numeric_string_safety_values(
 def test_settings_accepts_yaml_integer_values_for_float_thresholds(tmp_path: Path) -> None:
     config = tmp_path / "settings.yaml"
     config.write_text(
-        "paper:\n  initial_cash: 100000\n"
-        "strategy:\n  min_average_dollar_volume: 20000000\n"
+        "paper:\n  initial_cash: 100000\nstrategy:\n  min_average_dollar_volume: 20000000\n"
     )
 
     settings = load_settings(config)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from math import isfinite
 from typing import Any
 
 import numpy as np
@@ -32,6 +33,13 @@ def validate_ohlcv(
 ) -> pd.DataFrame:
     """Return a defensive canonical copy, rejecting unsafe daily OHLCV data."""
     normalized_ticker = normalize_ticker(ticker)
+    if (
+        isinstance(max_close_ratio, bool)
+        or not isinstance(max_close_ratio, int | float)
+        or not isfinite(max_close_ratio)
+        or max_close_ratio <= 1
+    ):
+        raise DataValidationError(f"{normalized_ticker}: max_close_ratio must be a finite number above 1")
     if not isinstance(frame, pd.DataFrame):
         raise DataValidationError(f"{normalized_ticker}: OHLCV must be a DataFrame")
     if frame.empty:
@@ -64,8 +72,6 @@ def validate_ohlcv(
         raise DataValidationError(f"{normalized_ticker}: high is below another price")
     if (canonical["low"] > canonical[["open", "high", "close"]].min(axis=1)).any():
         raise DataValidationError(f"{normalized_ticker}: low is above another price")
-    if max_close_ratio <= 1:
-        raise ValueError("max_close_ratio must be greater than 1")
     close_ratios = canonical["close"].div(canonical["close"].shift()).iloc[1:]
     if ((close_ratios > max_close_ratio) | (close_ratios < 1 / max_close_ratio)).any():
         raise DataValidationError(f"{normalized_ticker}: implausible one-day adjusted close jump")
