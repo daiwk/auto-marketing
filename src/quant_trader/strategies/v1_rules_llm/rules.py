@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from math import isfinite, sqrt
+from math import hypot, isfinite
 
 from quant_trader.data.validation import normalize_ticker
 from quant_trader.features.snapshot import FeatureRow
@@ -83,6 +83,13 @@ def _eligible(row: FeatureRow, min_dollar_volume: float) -> bool:
     )
 
 
+def _score(row: FeatureRow) -> float:
+    score = (0.2 * row.return_20 + 0.5 * row.return_60 + 0.3 * row.return_120) / row.volatility_20
+    if not isfinite(score):
+        raise ValueError(f"{row.ticker}: derived score must be finite")
+    return score
+
+
 def rank_candidates(
     rows: Iterable[FeatureRow],
     *,
@@ -107,32 +114,33 @@ def rank_candidates(
     for index, row in enumerate(all_rows):
         if not isinstance(row, FeatureRow):
             raise TypeError(f"rows[{index}] must be a FeatureRow")
+    tickers = [row.ticker for row in all_rows]
+    if len(set(tickers)) != len(tickers):
+        raise ValueError("duplicate ticker in candidate rows")
     eligible = [row for row in all_rows if _eligible(row, adtv)]
     scored = sorted(
-        (
-            (
-                row,
-                (0.2 * row.return_20 + 0.5 * row.return_60 + 0.3 * row.return_120)
-                / row.volatility_20,
-            )
-            for row in eligible
-        ),
+        ((row, _score(row)) for row in eligible),
         key=lambda item: (-item[1], item[0].ticker),
     )[:max_count]
     if not scored:
         return []
-    inverse_total = sum(1 / row.volatility_20 for row, _ in scored)
-    weights = [gross_cap * (1 / row.volatility_20) / inverse_total for row, _ in scored]
-    portfolio_volatility = sqrt(
-        sum(
-            (weight * row.volatility_20) ** 2
-            for weight, (row, _) in zip(weights, scored, strict=True)
-        )
+    reference_volatility = min(row.volatility_20 for row, _ in scored)
+    relative_inverse_volatilities = [reference_volatility / row.volatility_20 for row, _ in scored]
+    ratio_total = sum(relative_inverse_volatilities)
+    if not isfinite(ratio_total) or ratio_total <= 0:
+        raise ValueError("derived inverse-volatility ratios must be finite and positive")
+    weights = [gross_cap * ratio / ratio_total for ratio in relative_inverse_volatilities]
+    portfolio_volatility = hypot(
+        *(weight * row.volatility_20 for weight, (row, _) in zip(weights, scored, strict=True))
     )
+    if not isfinite(portfolio_volatility):
+        raise ValueError("derived portfolio volatility must be finite")
     if portfolio_volatility > target:
         scale = target / portfolio_volatility
         weights = [weight * scale for weight in weights]
     weights = [min(weight, position_cap) for weight in weights]
+    if not all(isfinite(weight) and 0 <= weight <= gross_cap for weight in weights):
+        raise ValueError("derived candidate weights must be finite and within gross exposure")
     return [
         Candidate(row.ticker, score, row.volatility_20, row.atr_14, row.close, weight)
         for (row, score), weight in zip(scored, weights, strict=True)

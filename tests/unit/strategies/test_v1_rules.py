@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from inspect import signature
+from sys import float_info
 
 import pytest
 
@@ -153,3 +154,64 @@ def test_candidate_rejects_invalid_base_weight(weight: object) -> None:
 def test_strategy_protocol_uses_plural_reviews_keyword() -> None:
     assert "reviews" in signature(Strategy.generate).parameters
     assert "review" not in signature(Strategy.generate).parameters
+
+
+def test_rank_rejects_duplicate_canonical_tickers_before_sizing() -> None:
+    with pytest.raises(ValueError, match="duplicate ticker"):
+        rank_candidates([row("abc"), row("ABC")])
+
+
+def test_rank_is_independent_of_input_order() -> None:
+    rows = [row("CCC", return_60=0.03), row("AAA"), row("BBB", return_60=0.05)]
+    forward = rank_candidates(rows)
+    reversed_rows = rank_candidates(list(reversed(rows)))
+
+    assert forward == reversed_rows
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("close", 0.0),
+        ("sma_200", 0.0),
+        ("return_20", -1.0),
+        ("return_60", -1.0),
+        ("return_120", -1.0),
+        ("volatility_20", -0.1),
+        ("atr_14", -0.1),
+        ("average_dollar_volume_20", -0.1),
+    ],
+)
+def test_feature_row_rejects_invalid_semantic_boundaries(field: str, value: float) -> None:
+    with pytest.raises(ValueError):
+        row(**{field: value})
+
+
+def test_flat_market_feature_row_is_valid_but_ineligible() -> None:
+    flat = row(volatility_20=0.0, atr_14=0.0, average_dollar_volume_20=0.0)
+    assert rank_candidates([flat]) == []
+
+
+def test_smallest_positive_subnormal_volatility_is_rejected_with_domain_error() -> None:
+    with pytest.raises(ValueError, match="derived score"):
+        rank_candidates(
+            [
+                row("AAA", volatility_20=float.fromhex("0x0.0000000000001p-1022")),
+                row("BBB", volatility_20=float.fromhex("0x0.0000000000001p-1022")),
+            ]
+        )
+
+
+def test_max_finite_volatility_never_overflows() -> None:
+    result = rank_candidates(
+        [row("AAA", volatility_20=float_info.max), row("BBB", volatility_20=float_info.max)],
+        max_position_weight=0.8,
+    )
+
+    assert len(result) == 2
+    assert all(0 <= candidate.base_weight <= 0.8 for candidate in result)
+
+
+def test_extreme_finite_momentum_is_rejected_before_candidate_construction() -> None:
+    with pytest.raises(ValueError, match="score"):
+        rank_candidates([row(return_20=float_info.max, volatility_20=0.1)])

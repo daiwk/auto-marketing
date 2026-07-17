@@ -61,6 +61,15 @@ class FeatureRow:
             if isinstance(value, bool) or not isinstance(value, int | float) or not isfinite(value):
                 raise ValueError(f"{name} must be a finite number")
             object.__setattr__(self, name, float(value))
+        if self.close <= 0 or self.sma_200 <= 0:
+            raise ValueError("close and sma_200 must be positive")
+        if any(getattr(self, name) <= -1 for name in ("return_20", "return_60", "return_120")):
+            raise ValueError("returns must be greater than -1")
+        if any(
+            getattr(self, name) < 0
+            for name in ("volatility_20", "atr_14", "average_dollar_volume_20")
+        ):
+            raise ValueError("volatility, ATR, and ADTV cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)
