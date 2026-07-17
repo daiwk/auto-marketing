@@ -15,11 +15,12 @@ from pydantic import (
     model_validator,
 )
 
+from quant_trader.validation import StrictNumber, USEquityTicker
+
 NonEmptyText = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2_000)
 ]
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
-Ticker = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20)]
 
 
 class ReviewAction(StrEnum):
@@ -40,8 +41,8 @@ class _ImmutableModel(BaseModel):
 
 class LLMReview(_ImmutableModel):
     action: ReviewAction
-    weight_multiplier: float = Field(ge=0, le=1)
-    confidence: float = Field(ge=0, le=1)
+    weight_multiplier: StrictNumber = Field(ge=0, le=1)
+    confidence: StrictNumber = Field(ge=0, le=1)
     thesis: NonEmptyText
     risks: tuple[NonEmptyText, ...] = ()
     invalidation: NonEmptyText
@@ -50,22 +51,17 @@ class LLMReview(_ImmutableModel):
 
 class SignalIntent(_ImmutableModel):
     decision_id: Identifier
-    ticker: Ticker
+    ticker: USEquityTicker
     side: SignalSide
-    proposed_weight: float = Field(ge=0, le=1)
+    proposed_weight: StrictNumber = Field(ge=0, le=1)
     signal_time: datetime
     earliest_execution_time: datetime
-    stop_price: float = Field(gt=0)
+    stop_price: StrictNumber = Field(gt=0)
     invalidation: NonEmptyText
     reason_codes: tuple[NonEmptyText, ...] = ()
     strategy_version: Identifier
     prompt_version: Identifier
     llm_cache_key: Identifier
-
-    @field_validator("ticker")
-    @classmethod
-    def normalize_ticker(cls, value: str) -> str:
-        return value.upper()
 
     @field_validator("signal_time", "earliest_execution_time")
     @classmethod
@@ -83,12 +79,7 @@ class SignalIntent(_ImmutableModel):
 
 class ApprovedOrder(_ImmutableModel):
     decision_id: Identifier
-    ticker: Ticker
-    target_weight: float = Field(ge=0, le=1)
+    ticker: USEquityTicker
+    target_weight: StrictNumber = Field(ge=0, le=1)
     execution_date: date
     reason_codes: tuple[NonEmptyText, ...] = ()
-
-    @field_validator("ticker")
-    @classmethod
-    def normalize_ticker(cls, value: str) -> str:
-        return value.upper()

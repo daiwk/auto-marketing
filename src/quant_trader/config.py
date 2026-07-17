@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+
+from quant_trader.validation import StrictInteger, StrictNumber, USEquityTicker
 
 
 class _StrictModel(BaseModel):
@@ -15,22 +18,22 @@ class _StrictModel(BaseModel):
 
 
 class PaperSettings(_StrictModel):
-    initial_cash: float = Field(default=100_000, gt=0)
+    initial_cash: StrictNumber = Field(default=100_000, gt=0)
 
 
 class StrategySettings(_StrictModel):
-    max_candidates: int = Field(default=4, ge=1)
-    min_average_dollar_volume: float = Field(default=20_000_000, ge=0)
-    target_volatility: float = Field(default=0.10, gt=0, le=1)
+    max_candidates: StrictInteger = Field(default=4, ge=1)
+    min_average_dollar_volume: StrictNumber = Field(default=20_000_000, ge=0)
+    target_volatility: StrictNumber = Field(default=0.10, gt=0, le=1)
 
 
 class RiskSettings(_StrictModel):
-    max_position_weight: float = Field(default=0.15, gt=0, le=1)
-    max_gross_exposure: float = Field(default=0.80, gt=0, le=1)
-    min_cash_weight: float = Field(default=0.20, ge=0, le=1)
-    reduce_drawdown: float = Field(default=0.10, gt=0, le=1)
-    halt_drawdown: float = Field(default=0.15, gt=0, le=1)
-    atr_multiple: float = Field(default=2.5, gt=0)
+    max_position_weight: StrictNumber = Field(default=0.15, gt=0, le=1)
+    max_gross_exposure: StrictNumber = Field(default=0.80, gt=0, le=1)
+    min_cash_weight: StrictNumber = Field(default=0.20, ge=0, le=1)
+    reduce_drawdown: StrictNumber = Field(default=0.10, gt=0, le=1)
+    halt_drawdown: StrictNumber = Field(default=0.15, gt=0, le=1)
+    atr_multiple: StrictNumber = Field(default=2.5, gt=0)
 
     @model_validator(mode="after")
     def validate_cross_fields(self) -> RiskSettings:
@@ -42,8 +45,8 @@ class RiskSettings(_StrictModel):
 
 
 class ExecutionSettings(_StrictModel):
-    slippage_bps: float = Field(default=10, ge=0)
-    commission_bps: float = Field(default=1, ge=0)
+    slippage_bps: StrictNumber = Field(default=10, ge=0)
+    commission_bps: StrictNumber = Field(default=1, ge=0)
 
 
 class LLMSettings(_StrictModel):
@@ -51,12 +54,30 @@ class LLMSettings(_StrictModel):
     base_url: str = "https://api.minimax.io/v1"
     model: str = "MiniMax-M2.7"
     prompt_version: str = "v1"
-    timeout_seconds: float = Field(default=30, gt=0)
-    max_retries: int = Field(default=2, ge=0, le=5)
+    timeout_seconds: StrictNumber = Field(default=30, gt=0)
+    max_retries: StrictInteger = Field(default=2, ge=0, le=5)
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def validate_base_url(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("base_url must be a nonblank http or https URL")
+        normalized = value.strip()
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("base_url must be a nonblank http or https URL")
+        return normalized
+
+    @field_validator("model", "prompt_version", mode="before")
+    @classmethod
+    def strip_required_label(cls, value: Any) -> str:
+        if not isinstance(value, str) or not (normalized := value.strip()):
+            raise ValueError("value must be a nonempty string")
+        return normalized
 
 
 class Settings(_StrictModel):
-    universe: tuple[str, ...] = (
+    universe: tuple[USEquityTicker, ...] = (
         "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"
     )
     paper: PaperSettings = Field(default_factory=PaperSettings)
@@ -77,7 +98,12 @@ def load_settings(path: Path | str) -> Settings:
                 raise ValueError("settings YAML must contain a mapping")
             data = loaded
 
-    llm = dict(data.get("llm", {}))
+    raw_llm = data.get("llm", {})
+    if not isinstance(raw_llm, dict):
+        raise ValueError("llm settings must be a mapping")
+    llm = cast(dict[str, Any], raw_llm).copy()
+    if "api_key" in llm:
+        raise ValueError("llm.api_key is environment-only; use MINIMAX_API_KEY")
     overrides = {
         "MINIMAX_API_KEY": "api_key",
         "MINIMAX_BASE_URL": "base_url",

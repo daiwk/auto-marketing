@@ -25,7 +25,7 @@ dependencies = [
 quant-trader = "quant_trader.cli:app"
 
 [project.optional-dependencies]
-dev = ["mypy", "pytest", "pytest-cov", "respx", "ruff"]
+dev = ["mypy", "pytest", "pytest-cov", "respx", "ruff", "types-PyYAML"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/quant_trader"]
@@ -39,3 +39,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
