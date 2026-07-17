@@ -39,6 +39,30 @@ def test_cache_rejects_corrupt_metadata(tmp_path) -> None:
         cache.read("SPY")
 
 
+def test_cache_requires_data_file_when_metadata_exists(tmp_path) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    cache.write("SPY", ohlcv())
+    (tmp_path / "market" / "SPY.parquet").unlink()
+    with pytest.raises(CacheError, match="data is missing"):
+        cache.read("SPY")
+
+
+def test_cache_requires_metadata_file_when_data_exists(tmp_path) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    cache.write("SPY", ohlcv())
+    (tmp_path / "market" / "SPY.json").unlink()
+    with pytest.raises(CacheError, match="metadata is missing"):
+        cache.read("SPY")
+
+
+def test_cache_rejects_corrupt_parquet(tmp_path) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    cache.write("SPY", ohlcv())
+    (tmp_path / "market" / "SPY.parquet").write_bytes(b"not parquet")
+    with pytest.raises(CacheError, match="corrupt cache data"):
+        cache.read("SPY")
+
+
 def test_cache_rejects_non_utc_retrieval_metadata(tmp_path) -> None:
     cache = ParquetMarketCache(tmp_path)
     cache.write("SPY", ohlcv())
@@ -47,6 +71,26 @@ def test_cache_rejects_non_utc_retrieval_metadata(tmp_path) -> None:
     metadata["retrieved_at"] = "2026-01-06T08:00:00+08:00"
     path.write_text(json.dumps(metadata))
     with pytest.raises(CacheError, match="metadata"):
+        cache.read("SPY")
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("schema_version", True),
+        ("row_count", True),
+        ("max_market_date", "2026-01-05T00:00:00"),
+        ("retrieved_at", "2026-01-06T00:00:00"),
+    ],
+)
+def test_cache_rejects_noncanonical_metadata_types(tmp_path, key: str, value: object) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    cache.write("SPY", ohlcv())
+    path = tmp_path / "market" / "SPY.json"
+    metadata = json.loads(path.read_text())
+    metadata[key] = value
+    path.write_text(json.dumps(metadata))
+    with pytest.raises(CacheError, match="metadata|schema"):
         cache.read("SPY")
 
 

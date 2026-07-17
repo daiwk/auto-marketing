@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 import json
 import os
 from pathlib import Path
@@ -101,16 +101,24 @@ class ParquetMarketCache:
     @staticmethod
     def _validate_metadata(metadata: dict[str, Any], ticker: str) -> None:
         expected = {"ticker", "retrieved_at", "max_market_date", "row_count", "schema_version"}
-        if set(metadata) != expected or metadata["ticker"] != ticker:
+        if set(metadata) != expected or type(metadata["ticker"]) is not str or metadata["ticker"] != ticker:
             raise CacheError(f"{ticker}: corrupt cache metadata")
-        if metadata["schema_version"] != 1:
+        if type(metadata["schema_version"]) is not int or metadata["schema_version"] != 1:
             raise CacheError(f"{ticker}: unsupported cache schema version")
-        if not isinstance(metadata["row_count"], int) or metadata["row_count"] <= 0:
+        if type(metadata["row_count"]) is not int or metadata["row_count"] <= 0:
             raise CacheError(f"{ticker}: corrupt cache metadata")
         try:
-            timestamp = datetime.fromisoformat(metadata["retrieved_at"])
+            retrieved_at = metadata["retrieved_at"]
+            max_market_date = metadata["max_market_date"]
+            if type(retrieved_at) is not str or type(max_market_date) is not str:
+                raise ValueError
+            timestamp = datetime.fromisoformat(retrieved_at)
             if timestamp.tzinfo is None or timestamp.utcoffset() != UTC.utcoffset(timestamp):
                 raise ValueError
-            datetime.fromisoformat(metadata["max_market_date"])
+            if timestamp.isoformat() != retrieved_at:
+                raise ValueError
+            parsed_date = date.fromisoformat(max_market_date)
+            if parsed_date.isoformat() != max_market_date:
+                raise ValueError
         except (TypeError, ValueError) as error:
             raise CacheError(f"{ticker}: corrupt cache metadata") from error

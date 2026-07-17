@@ -15,8 +15,14 @@ class YFinanceSource:
 
     def fetch(self, ticker: str, start: date, end: date) -> pd.DataFrame:
         normalized_ticker = normalize_ticker(ticker)
+        if type(start) is not date or type(end) is not date:
+            raise DataValidationError(
+                f"{normalized_ticker}: invalid date range {start!r} to {end!r}; dates are required"
+            )
         if start >= end:
-            raise DataValidationError(f"{normalized_ticker}: start must be before end")
+            raise DataValidationError(
+                f"{normalized_ticker}: invalid date range {start} to {end}; start must be before end"
+            )
         try:
             raw = yfinance.download(
                 normalized_ticker,
@@ -31,19 +37,31 @@ class YFinanceSource:
             raise DataValidationError(f"{normalized_ticker}: download failed for {start} to {end}") from error
         if not isinstance(raw, pd.DataFrame) or raw.empty:
             raise DataValidationError(f"{normalized_ticker}: empty response for {start} to {end}")
-        flat = self._flatten(raw, normalized_ticker)
-        columns = {str(column).lower(): column for column in flat.columns}
+        try:
+            flat = self._flatten(raw, normalized_ticker)
+            frame = self._canonical_columns(flat, normalized_ticker)
+            index = pd.DatetimeIndex(frame.index)
+            if index.tz is not None:
+                index = index.tz_localize(None)
+            frame.index = index.normalize()
+            frame.index.name = "date"
+            return validate_ohlcv(frame, normalized_ticker)
+        except (DataValidationError, KeyError, TypeError, ValueError) as error:
+            raise DataValidationError(
+                f"{normalized_ticker}: invalid response for {start} to {end}: {error}"
+            ) from error
+
+    @staticmethod
+    def _canonical_columns(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
+        if isinstance(frame.columns, pd.MultiIndex):
+            raise DataValidationError(f"{ticker}: unexpected multi-index response columns")
         required = ["open", "high", "low", "close", "volume"]
-        if not all(name in columns for name in required):
-            raise DataValidationError(f"{normalized_ticker}: response lacks required OHLCV columns")
-        frame = flat[[columns[name] for name in required]].copy()
-        frame.columns = required
-        index = pd.DatetimeIndex(frame.index)
-        if index.tz is not None:
-            index = index.tz_convert(None)
-        frame.index = index.normalize()
-        frame.index.name = "date"
-        return validate_ohlcv(frame, normalized_ticker)
+        labels = [str(column).lower() for column in frame.columns]
+        if len(labels) != len(required) or set(labels) != set(required):
+            raise DataValidationError(f"{ticker}: unexpected response columns")
+        canonical = frame.copy()
+        canonical.columns = labels
+        return canonical[required]
 
     @staticmethod
     def _flatten(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:

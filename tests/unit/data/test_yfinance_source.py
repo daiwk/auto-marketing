@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import pytest
@@ -48,3 +48,42 @@ def test_fetch_rejects_multiple_ticker_output_and_invalid_range(monkeypatch) -> 
         YFinanceSource().fetch("SPY", date(2026, 1, 2), date(2026, 1, 6))
     with pytest.raises(DataValidationError, match="start"):
         YFinanceSource().fetch("SPY", date(2026, 1, 6), date(2026, 1, 6))
+
+
+@pytest.mark.parametrize(
+    "start, end",
+    [
+        ("2026-01-02", date(2026, 1, 6)),
+        (None, date(2026, 1, 6)),
+        (1, date(2026, 1, 6)),
+        (datetime(2026, 1, 2), date(2026, 1, 6)),
+    ],
+)
+def test_fetch_rejects_non_date_inputs_without_calling_provider(monkeypatch, start: object, end: object) -> None:
+    monkeypatch.setattr("yfinance.download", lambda *args, **kwargs: pytest.fail("provider called"))
+    with pytest.raises(DataValidationError, match="SPY.*date range"):
+        YFinanceSource().fetch("SPY", start, end)  # type: ignore[arg-type]
+
+
+def test_fetch_wraps_provider_exception_with_ticker_and_range(monkeypatch) -> None:
+    def fail(*args: object, **kwargs: object) -> pd.DataFrame:
+        raise RuntimeError("provider failure")
+    monkeypatch.setattr("yfinance.download", fail)
+    with pytest.raises(DataValidationError, match="SPY.*2026-01-02.*2026-01-06") as error:
+        YFinanceSource().fetch("SPY", date(2026, 1, 2), date(2026, 1, 6))
+    assert isinstance(error.value.__cause__, RuntimeError)
+
+
+def test_fetch_rejects_unexpected_flat_columns(monkeypatch) -> None:
+    frame = raw_frame().assign(Adj_Close=[101, 102])
+    monkeypatch.setattr("yfinance.download", lambda *args, **kwargs: frame)
+    with pytest.raises(DataValidationError, match="SPY.*2026-01-02.*unexpected"):
+        YFinanceSource().fetch("SPY", date(2026, 1, 2), date(2026, 1, 6))
+
+
+def test_fetch_wraps_non_convertible_index(monkeypatch) -> None:
+    frame = raw_frame().copy()
+    frame.index = pd.Index(["not-a-date", "still-not-a-date"])
+    monkeypatch.setattr("yfinance.download", lambda *args, **kwargs: frame)
+    with pytest.raises(DataValidationError, match="SPY.*invalid response.*2026-01-02"):
+        YFinanceSource().fetch("SPY", date(2026, 1, 2), date(2026, 1, 6))
