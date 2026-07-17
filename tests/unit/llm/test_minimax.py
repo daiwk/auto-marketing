@@ -6,7 +6,12 @@ import httpx
 import pytest
 
 from quant_trader.llm.base import ChatMessage
-from quant_trader.llm.minimax import MiniMaxError, MiniMaxReviewer
+from quant_trader.llm.minimax import (
+    MAX_COMPLETION_CHARS,
+    MAX_RESPONSE_BYTES,
+    MiniMaxError,
+    MiniMaxReviewer,
+)
 
 
 def response(content: str = "{}") -> httpx.Response:
@@ -191,6 +196,32 @@ def test_minimax_terminal_exhaustion_and_client_ownership() -> None:
     supplied.close()
 
 
+def test_minimax_enforces_its_timeout_and_redirect_policy_with_borrowed_client() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(302, headers={"Location": "https://api.minimax.io/other"})
+        return response()
+
+    supplied = httpx.Client(follow_redirects=True, transport=httpx.MockTransport(handler))
+    reviewer = MiniMaxReviewer("secret", timeout_seconds=7, max_retries=0, client=supplied)
+
+    with pytest.raises(MiniMaxError):
+        reviewer.complete([{"role": "user", "content": "x"}])
+    assert len(seen) == 1
+    assert seen[0].extensions["timeout"] == {
+        "connect": 7,
+        "read": 7,
+        "write": 7,
+        "pool": 7,
+    }
+    reviewer.close()
+    assert not supplied.is_closed
+    supplied.close()
+
+
 @pytest.mark.parametrize(
     "bad",
     [
@@ -246,8 +277,47 @@ def test_minimax_retries_timeout_and_rejects_malformed_success_json() -> None:
         malformed.complete([{"role": "user", "content": "x"}])
 
 
+@pytest.mark.parametrize(
+    "provider_response",
+    [
+        lambda: httpx.Response(200, content=b"x" * (MAX_RESPONSE_BYTES + 1)),
+        lambda: response("x" * (MAX_COMPLETION_CHARS + 1)),
+        lambda: httpx.Response(200, text="[" * 1_100 + "0" + "]" * 1_100),
+    ],
+)
+def test_minimax_rejects_oversized_or_recursive_success_responses_without_retry(
+    provider_response: object,
+) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return provider_response()  # type: ignore[operator]
+
+    reviewer = MiniMaxReviewer("secret", max_retries=2, transport=httpx.MockTransport(handler))
+    with pytest.raises(MiniMaxError) as error:
+        reviewer.complete([{"role": "user", "content": "x"}])
+    assert calls == 1
+    assert error.value.__cause__ is not None
+
+
+def test_minimax_rejects_empty_messages_without_making_a_request() -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return response()
+
+    reviewer = MiniMaxReviewer("secret", transport=httpx.MockTransport(handler))
+    with pytest.raises(ValueError, match="at least one"):
+        reviewer.complete([])
+    assert calls == 0
+
+
 def test_minimax_rejects_invalid_constructor_values() -> None:
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(MiniMaxError):
         MiniMaxReviewer("", timeout_seconds=1)
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(MiniMaxError):
         MiniMaxReviewer("key", timeout_seconds=True)  # type: ignore[arg-type]

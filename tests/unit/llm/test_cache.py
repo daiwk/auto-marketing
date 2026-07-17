@@ -42,3 +42,8 @@ def test_cache_key_rejects_noncanonical_values(
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
         review_cache_key(model, prompt_version, messages)  # type: ignore[arg-type]
+
+
+def test_cache_key_rejects_an_empty_message_sequence() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        review_cache_key("model", "v1", [])

@@ -6,15 +6,18 @@ import json
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, NoReturn
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import SecretStr, ValidationError
 
 from quant_trader.config import LLMSettings
-from quant_trader.llm.base import MessageInput, canonical_messages
+from quant_trader.llm.base import MessageInput, SanitizedLLMCause, canonical_messages
 
 _MAX_RETRY_AFTER_SECONDS = 60.0
+MAX_RESPONSE_BYTES = 256 * 1024
+MAX_COMPLETION_CHARS = 16 * 1024
 
 
 class MiniMaxError(RuntimeError):
@@ -24,6 +27,13 @@ class MiniMaxError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.attempts = attempts
+
+
+def _raise_minimax_error(
+    message: str, category: str, *, status_code: int | None, attempts: int
+) -> NoReturn:
+    cause = SanitizedLLMCause(category, status_code=status_code, attempts=attempts)
+    raise MiniMaxError(message, status_code=status_code, attempts=attempts) from cause
 
 
 class MiniMaxReviewer:
@@ -41,7 +51,22 @@ class MiniMaxReviewer:
         transport: httpx.BaseTransport | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
-        self._api_key = _api_key_value(api_key)
+        key_error = False
+        key_value = ""
+        try:
+            key_value = _api_key_value(api_key)
+        except (TypeError, ValueError):
+            key_error = True
+        if key_error:
+            _raise_minimax_error(
+                "MiniMax connection settings are invalid",
+                "invalid-api-key",
+                status_code=None,
+                attempts=0,
+            )
+        self._api_key = key_value
+        settings: LLMSettings | None = None
+        settings_error = False
         try:
             settings = LLMSettings(
                 base_url=base_url,
@@ -49,14 +74,43 @@ class MiniMaxReviewer:
                 timeout_seconds=timeout_seconds,
                 max_retries=max_retries,
             )
-        except ValidationError as error:
-            raise ValueError("invalid MiniMax connection settings") from error
+        except ValidationError:
+            settings_error = True
+        if settings_error or settings is None:
+            _raise_minimax_error(
+                "MiniMax connection settings are invalid",
+                "invalid-connection-settings",
+                status_code=None,
+                attempts=0,
+            )
+        if urlsplit(settings.base_url).scheme != "https":
+            _raise_minimax_error(
+                "MiniMax requires an HTTPS base URL",
+                "insecure-base-url",
+                status_code=None,
+                attempts=0,
+            )
         if not callable(sleeper):
-            raise TypeError("sleeper must be callable")
+            _raise_minimax_error(
+                "MiniMax connection settings are invalid",
+                "invalid-sleeper",
+                status_code=None,
+                attempts=0,
+            )
         if client is not None and transport is not None:
-            raise ValueError("client and transport cannot both be supplied")
+            _raise_minimax_error(
+                "MiniMax connection settings are invalid",
+                "conflicting-client-options",
+                status_code=None,
+                attempts=0,
+            )
         if client is not None and not isinstance(client, httpx.Client):
-            raise TypeError("client must be an httpx.Client")
+            _raise_minimax_error(
+                "MiniMax connection settings are invalid",
+                "invalid-client",
+                status_code=None,
+                attempts=0,
+            )
 
         self.base_url = settings.base_url
         self.model = settings.model
@@ -89,33 +143,45 @@ class MiniMaxReviewer:
         }
         headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
         for attempt in range(1, self.max_retries + 2):
+            transport_failure = False
             try:
-                response = self.client.post(self._endpoint, json=payload, headers=headers)
-            except httpx.TransportError as error:
+                response = self.client.post(
+                    self._endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.timeout_seconds,
+                    follow_redirects=False,
+                )
+            except httpx.TransportError:
+                transport_failure = True
+            if transport_failure:
                 if self._can_retry(attempt):
                     self._sleeper(self._retry_delay(attempt, None))
                     continue
-                raise MiniMaxError(
-                    "MiniMax network request failed", status_code=None, attempts=attempt
-                ) from error
+                _raise_minimax_error(
+                    "MiniMax network request failed",
+                    "network-request",
+                    status_code=None,
+                    attempts=attempt,
+                )
 
             if response.status_code == 429 or 500 <= response.status_code <= 599:
-                status_error = RuntimeError(f"MiniMax returned HTTP {response.status_code}")
                 if self._can_retry(attempt):
                     self._sleeper(self._retry_delay(attempt, response))
                     continue
-                raise MiniMaxError(
+                _raise_minimax_error(
                     f"MiniMax request failed (status={response.status_code}, attempts={attempt})",
+                    "retryable-http-status",
                     status_code=response.status_code,
                     attempts=attempt,
-                ) from status_error
+                )
             if not 200 <= response.status_code < 300:
-                status_error = RuntimeError(f"MiniMax returned HTTP {response.status_code}")
-                raise MiniMaxError(
+                _raise_minimax_error(
                     f"MiniMax request failed (status={response.status_code}, attempts={attempt})",
+                    "http-status",
                     status_code=response.status_code,
                     attempts=attempt,
-                ) from status_error
+                )
             return self._response_content(response, attempt)
         raise AssertionError("unreachable")
 
@@ -139,14 +205,41 @@ class MiniMaxReviewer:
 
     @staticmethod
     def _response_content(response: httpx.Response, attempt: int) -> str:
+        body_access_failed = False
+        response_size = 0
         try:
-            payload: Any = response.json()
-        except (ValueError, json.JSONDecodeError) as error:
-            raise MiniMaxError(
-                "MiniMax response was not valid JSON",
+            response_size = len(response.content)
+        except Exception:
+            body_access_failed = True
+        if body_access_failed:
+            _raise_minimax_error(
+                "MiniMax response could not be read",
+                "response-read",
                 status_code=response.status_code,
                 attempts=attempt,
-            ) from error
+            )
+        if response_size > MAX_RESPONSE_BYTES:
+            _raise_minimax_error(
+                "MiniMax response exceeds the allowed size",
+                "response-too-large",
+                status_code=response.status_code,
+                attempts=attempt,
+            )
+        invalid_json = False
+        payload: Any = None
+        try:
+            payload = response.json()
+        except (ValueError, UnicodeError, json.JSONDecodeError, RecursionError):
+            invalid_json = True
+        if invalid_json:
+            _raise_minimax_error(
+                "MiniMax response was not valid JSON",
+                "invalid-response-json",
+                status_code=response.status_code,
+                attempts=attempt,
+            )
+        invalid_content = False
+        content = ""
         try:
             if not isinstance(payload, Mapping):
                 raise TypeError("response JSON root must be an object")
@@ -164,12 +257,22 @@ class MiniMaxReviewer:
                 raise TypeError("content must be a string")
             if not content.strip():
                 raise ValueError("content must be nonblank")
-        except (IndexError, KeyError, TypeError, ValueError) as error:
-            raise MiniMaxError(
+        except (IndexError, KeyError, TypeError, ValueError):
+            invalid_content = True
+        if invalid_content:
+            _raise_minimax_error(
                 "MiniMax response did not contain valid completion content",
+                "invalid-completion-content",
                 status_code=response.status_code,
                 attempts=attempt,
-            ) from error
+            )
+        if len(content) > MAX_COMPLETION_CHARS:
+            _raise_minimax_error(
+                "MiniMax completion exceeds the allowed size",
+                "completion-too-large",
+                status_code=response.status_code,
+                attempts=attempt,
+            )
         return content
 
 
