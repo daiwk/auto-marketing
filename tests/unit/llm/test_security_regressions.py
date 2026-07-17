@@ -136,6 +136,19 @@ def _assert_sanitized_exception_graph(error: BaseException, *additional_forbidde
     inspect_tracebacks(error, set())
 
 
+def _assert_library_traceback_frames_cleared(error: BaseException) -> None:
+    found_library_frame = False
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        filename = Path(frame.f_code.co_filename)
+        if _SOURCE_ROOT == filename.parent or _SOURCE_ROOT in filename.parents:
+            found_library_frame = True
+            assert frame.f_locals == {}
+        traceback = traceback.tb_next
+    assert found_library_frame
+
+
 @pytest.mark.parametrize("invalid_option", ["sleeper", "client", "client_and_transport"])
 def test_invalid_constructor_dependencies_do_not_survive_in_traceback_locals(
     invalid_option: str,
@@ -352,6 +365,83 @@ def test_custom_byte_stream_uses_raw_not_decoded_streaming_with_bounded_consumpt
         assert stream.reads == 1
         assert stream.bytes_read <= MAX_RESPONSE_BYTES
         assert stream.closed
+    finally:
+        reviewer.close()
+
+
+def test_streamed_read_timeout_closes_response_and_retries_to_success() -> None:
+    calls = 0
+    delays: list[float] = []
+    streams: list[CountingStream] = []
+    timeouts: list[httpx.ReadTimeout] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            timeout = httpx.ReadTimeout(f"{_URL} {_BODY} {_AUTHORIZATION}", request=request)
+            timeouts.append(timeout)
+            stream = CountingStream([_BODY.encode()], read_error=timeout)
+        else:
+            assert streams[0].closed, "timed-out response must close before retry"
+            stream = CountingStream([_success_bytes("recovered")])
+        streams.append(stream)
+        return httpx.Response(200, stream=stream)
+
+    reviewer = MiniMaxReviewer(
+        _KEY,
+        max_retries=1,
+        transport=httpx.MockTransport(handler),
+        sleeper=delays.append,
+    )
+    try:
+        assert reviewer.complete(_MESSAGES) == "recovered"
+        assert calls == 2
+        assert delays == [1]
+        assert all(stream.closed for stream in streams)
+        assert len(timeouts) == 1
+        _assert_library_traceback_frames_cleared(timeouts[0])
+    finally:
+        reviewer.close()
+
+
+def test_streamed_read_timeout_exhaustion_is_sanitized_as_transport_failure() -> None:
+    calls = 0
+    delays: list[float] = []
+    streams: list[CountingStream] = []
+    timeouts: list[httpx.ReadTimeout] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        if streams:
+            assert streams[-1].closed, "timed-out response must close before retry"
+        calls += 1
+        timeout = httpx.ReadTimeout(f"{_URL} {_BODY} {_AUTHORIZATION}", request=request)
+        timeouts.append(timeout)
+        stream = CountingStream([_BODY.encode()], read_error=timeout)
+        streams.append(stream)
+        return httpx.Response(200, stream=stream)
+
+    reviewer = MiniMaxReviewer(
+        _KEY,
+        max_retries=1,
+        transport=httpx.MockTransport(handler),
+        sleeper=delays.append,
+    )
+    try:
+        with pytest.raises(MiniMaxError) as raised:
+            reviewer.complete(_MESSAGES)
+        assert calls == 2
+        assert delays == [1]
+        assert all(stream.closed for stream in streams)
+        assert raised.value.status_code is None
+        assert raised.value.attempts == 2
+        assert raised.value.__cause__ is not None
+        assert raised.value.__cause__.__cause__ is None
+        _assert_sanitized_exception_graph(raised.value)
+        assert len(timeouts) == 2
+        for timeout in timeouts:
+            _assert_library_traceback_frames_cleared(timeout)
     finally:
         reviewer.close()
 

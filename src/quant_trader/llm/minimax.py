@@ -282,8 +282,11 @@ class MiniMaxReviewer:
                         )
                     else:
                         return self._response_content(response, attempt)
-            except httpx.TransportError:
+            except httpx.TransportError as error:
                 transport_failure = True
+                if error.__traceback__ is not None:
+                    error.__traceback__ = error.__traceback__.tb_next
+                _clear_traceback_frames(error)
             if transport_failure:
                 if attempt <= attempt_limit:
                     self._sleeper(self._retry_delay(attempt, None))
@@ -352,6 +355,8 @@ class MiniMaxReviewer:
                 body.extend(chunk)
                 if len(body) > MAX_RESPONSE_BYTES:
                     break
+        except httpx.TransportError:
+            raise
         except Exception:
             body_access_failed = True
         if body_access_failed:
