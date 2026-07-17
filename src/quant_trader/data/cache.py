@@ -37,8 +37,10 @@ class ParquetMarketCache:
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise CacheError(f"{normalized_ticker}: retrieved_at must be timezone-aware")
         timestamp = timestamp.astimezone(UTC)
-        directory = self._directory()
-        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            directory = self._ensure_directory()
+        except OSError as error:
+            raise CacheError(f"{normalized_ticker}: failed to create cache directory") from error
         generation = uuid4().hex
         data_name = f"{normalized_ticker}.{generation}.parquet"
         data_path = directory / data_name
@@ -48,7 +50,8 @@ class ParquetMarketCache:
         try:
             canonical.to_parquet(temp_data)
             self._fsync_file(temp_data)
-            os.replace(temp_data, data_path)
+            self._publish_generation(temp_data, data_path)
+            self._fsync_directory(directory)
             manifest = {
                 "ticker": normalized_ticker,
                 "retrieved_at": timestamp.isoformat(),
@@ -60,7 +63,8 @@ class ParquetMarketCache:
                 "sha256": self._digest(data_path),
             }
             self._write_json_fsynced(temp_manifest, manifest)
-            os.replace(temp_manifest, manifest_path)
+            self._publish_manifest(temp_manifest, manifest_path)
+            self._fsync_directory(directory)
         except OSError as error:
             raise CacheError(f"{normalized_ticker}: failed to write cache generation") from error
         finally:
@@ -120,6 +124,13 @@ class ParquetMarketCache:
     def _directory(self) -> Path:
         return self.root / "market"
 
+    def _ensure_directory(self) -> Path:
+        directory = self._directory()
+        if not directory.exists():
+            directory.mkdir(parents=True)
+            self._fsync_directory(directory.parent)
+        return directory
+
     def _resolve_data_path(self, metadata: dict[str, Any], ticker: str) -> Path:
         data_file = metadata["data_file"]
         directory = self._directory().resolve()
@@ -144,6 +155,23 @@ class ParquetMarketCache:
     def _fsync_file(path: Path) -> None:
         with path.open("rb") as file:
             os.fsync(file.fileno())
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        descriptor = os.open(path, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _publish_generation(source: Path, target: Path) -> None:
+        os.replace(source, target)
+
+    @staticmethod
+    def _publish_manifest(source: Path, target: Path) -> None:
+        os.replace(source, target)
 
     @staticmethod
     def _write_json_fsynced(path: Path, manifest: dict[str, Any]) -> None:

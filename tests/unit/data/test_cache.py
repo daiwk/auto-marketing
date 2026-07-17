@@ -52,6 +52,69 @@ def test_cache_failed_generation_write_preserves_previous_manifest(tmp_path, mon
     assert not list(tmp_path.rglob("*.tmp"))
 
 
+@pytest.mark.parametrize("failure_point", ["generation", "manifest_write", "manifest_publish"])
+def test_cache_pre_switch_failures_preserve_previous_generation(
+    tmp_path, monkeypatch, failure_point: str
+) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    cache.write("SPY", ohlcv())
+    old_manifest = metadata_path(tmp_path).read_bytes()
+    old_metadata = cache.read_metadata("SPY")
+    old_data = cache.read("SPY")
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError(failure_point)
+
+    target = {
+        "generation": "_publish_generation",
+        "manifest_write": "_write_json_fsynced",
+        "manifest_publish": "_publish_manifest",
+    }[failure_point]
+    monkeypatch.setattr(cache, target, fail)
+    with pytest.raises(CacheError, match="failed to write") as error:
+        cache.write("SPY", ohlcv())
+    assert isinstance(error.value.__cause__, OSError)
+    assert metadata_path(tmp_path).read_bytes() == old_manifest
+    assert cache.read_metadata("SPY") == old_metadata
+    pd.testing.assert_frame_equal(cache.read("SPY"), old_data)
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_cache_fsyncs_market_directory_after_each_publish(tmp_path, monkeypatch) -> None:
+    (tmp_path / "market").mkdir()
+    cache = ParquetMarketCache(tmp_path)
+    events: list[str] = []
+    publish_generation = cache._publish_generation
+    publish_manifest = cache._publish_manifest
+    sync_directory = cache._fsync_directory
+
+    def track_generation(*args: object) -> None:
+        events.append("generation")
+        publish_generation(*args)  # type: ignore[arg-type]
+
+    def track_manifest(*args: object) -> None:
+        events.append("manifest")
+        publish_manifest(*args)  # type: ignore[arg-type]
+
+    def track_directory(path: object) -> None:
+        events.append("directory")
+        sync_directory(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cache, "_publish_generation", track_generation)
+    monkeypatch.setattr(cache, "_publish_manifest", track_manifest)
+    monkeypatch.setattr(cache, "_fsync_directory", track_directory)
+    cache.write("SPY", ohlcv())
+    assert events == ["generation", "directory", "manifest", "directory"]
+
+
+def test_cache_fsyncs_parent_when_creating_market_directory(tmp_path, monkeypatch) -> None:
+    cache = ParquetMarketCache(tmp_path)
+    synced: list[object] = []
+    monkeypatch.setattr(cache, "_fsync_directory", lambda path: synced.append(path))
+    cache.write("SPY", ohlcv())
+    assert synced == [tmp_path, tmp_path / "market", tmp_path / "market"]
+
+
 def test_cache_rejects_digest_mismatch(tmp_path) -> None:
     cache = ParquetMarketCache(tmp_path)
     cache.write("SPY", ohlcv())
