@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from math import inf, nan
 
 import pytest
@@ -135,12 +135,39 @@ def test_signal_intent_requires_execution_on_a_later_date_and_normalizes_ticker(
     )
     assert intent.ticker == "SPY"
 
-    with pytest.raises(ValidationError, match="later date"):
+    with pytest.raises(ValidationError, match="later than signal_time"):
         SignalIntent(**(intent.model_dump() | {"earliest_execution_time": now}))
     with pytest.raises(ValidationError, match="later date"):
         SignalIntent(
             **(intent.model_dump() | {"earliest_execution_time": now + timedelta(hours=1)})
         )
+
+
+def test_signal_intent_rejects_later_local_date_that_is_not_a_later_instant() -> None:
+    signal = datetime(2025, 1, 2, 23, tzinfo=UTC)
+    plus_nine = timezone(timedelta(hours=9))
+    payload = {
+        "decision_id": "decision-1",
+        "ticker": "SPY",
+        "side": "buy",
+        "proposed_weight": 0.1,
+        "signal_time": signal,
+        "earliest_execution_time": datetime(2025, 1, 3, 0, tzinfo=plus_nine),
+        "stop_price": 100,
+        "invalidation": "Price falls below support.",
+        "reason_codes": ["momentum"],
+        "strategy_version": "v1",
+        "prompt_version": "v1",
+        "llm_cache_key": "cache-1",
+    }
+
+    with pytest.raises(ValidationError, match="later than signal_time"):
+        SignalIntent(**payload)
+
+    valid = SignalIntent(
+        **(payload | {"earliest_execution_time": datetime(2025, 1, 3, 9, tzinfo=plus_nine)})
+    )
+    assert valid.earliest_execution_time > valid.signal_time
 
 
 def test_signal_intent_requires_a_valid_explicit_side() -> None:

@@ -457,6 +457,8 @@ class V1RulesLLMStrategy:
                 raise ValueError(f"{name} must be timezone-aware datetime")
         if signal_time.date() != snapshot.as_of.date():
             raise ValueError("signal_time date must match snapshot as_of")
+        if execution_time <= signal_time:
+            raise ValueError("earliest_execution_time must be later than signal_time")
         if execution_time.date() <= snapshot.as_of.date():
             raise ValueError("earliest_execution_time must be on a later date than snapshot as_of")
 
@@ -526,24 +528,29 @@ class V1RulesLLMStrategy:
         current_weight: float,
         drawdown: float,
     ) -> StrategyDecision:
-        messages = render_review_prompt(
-            candidate,
-            row,
-            cash_weight=cash_weight,
-            current_weight=current_weight,
-            drawdown=drawdown,
-        )
-        outcome = review_candidate(
-            self._reviewer, messages, model=self.model, prompt_version=self.prompt_version
-        )
-        outcome = replace(outcome, candidate_ticker=candidate.ticker)
         stop, invalid_stop = self._stop_price(candidate)
         if invalid_stop:
-            outcome = replace(
-                outcome,
-                review=_synthetic_reject("invalid_stop"),
-                failure_reason="invalid_stop",
+            cache_key = self._synthetic_cache_key(row, snapshot, "invalid_stop")
+            outcome = _outcome(
+                candidate.ticker,
+                _synthetic_reject("invalid_stop"),
+                (),
+                cache_key,
+                False,
+                "invalid_stop",
             )
+        else:
+            messages = render_review_prompt(
+                candidate,
+                row,
+                cash_weight=cash_weight,
+                current_weight=current_weight,
+                drawdown=drawdown,
+            )
+            outcome = review_candidate(
+                self._reviewer, messages, model=self.model, prompt_version=self.prompt_version
+            )
+            outcome = replace(outcome, candidate_ticker=candidate.ticker)
         proposed_weight = min(
             candidate.base_weight,
             candidate.base_weight * outcome.review.weight_multiplier,

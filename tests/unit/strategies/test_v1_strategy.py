@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import FrozenInstanceError, asdict, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from inspect import signature
 
 import pandas as pd
@@ -317,6 +317,33 @@ def test_same_day_execution_is_rejected_and_next_date_is_accepted() -> None:
     assert result[0].intent.earliest_execution_time.date() > source.as_of.date()
 
 
+def test_strategy_rejects_later_local_date_that_is_not_a_later_instant() -> None:
+    subject = strategy(Reviewer([response()]))
+    source = snapshot(feature())
+    signal = datetime(2025, 1, 2, 23, tzinfo=UTC)
+    plus_nine = timezone(timedelta(hours=9))
+    kwargs = {
+        "signal_time": signal,
+        "cash_weight": 0.9,
+        "current_weights": {"AAA": 0.1},
+        "drawdown": 0,
+    }
+
+    with pytest.raises(ValueError, match="later than signal_time"):
+        subject.decide(
+            source,
+            earliest_execution_time=datetime(2025, 1, 3, 0, tzinfo=plus_nine),
+            **kwargs,
+        )
+
+    result = subject.decide(
+        source,
+        earliest_execution_time=datetime(2025, 1, 3, 9, tzinfo=plus_nine),
+        **kwargs,
+    )
+    assert result[0].intent.earliest_execution_time > result[0].intent.signal_time
+
+
 def test_config_is_frozen_strict_and_default_stop_multiple_is_exactly_two_point_five() -> None:
     config = V1StrategyConfig()
 
@@ -399,7 +426,8 @@ def test_strategy_ranks_internally_and_revalidates_position_and_gross_caps(
 
 
 def test_invalid_stop_is_authoritative_across_outcome_decision_and_intent() -> None:
-    decision = decide(Reviewer([response()]), snapshot(feature(close=1, sma_200=0.5, atr_14=2)))[0]
+    reviewer = Reviewer([])
+    decision = decide(reviewer, snapshot(feature(close=1, sma_200=0.5, atr_14=2)))[0]
 
     assert decision.failure_reason == "invalid_stop"
     assert decision.review_outcome.failure_reason == "invalid_stop"
@@ -409,6 +437,8 @@ def test_invalid_stop_is_authoritative_across_outcome_decision_and_intent() -> N
     assert decision.intent.invalidation == decision.review_outcome.review.invalidation
     assert decision.intent.invalidation != "Close below trend."
     assert "invalid_stop" in decision.intent.reason_codes
+    assert decision.review_outcome.raw_outputs == ()
+    assert reviewer.messages == []
 
 
 def test_raw_audit_is_bounded_with_complete_metadata_and_safe_normal_serialization() -> None:

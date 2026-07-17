@@ -72,6 +72,8 @@ class SignalIntent(_ImmutableModel):
 
     @model_validator(mode="after")
     def require_execution_after_signal(self) -> SignalIntent:
+        if self.earliest_execution_time <= self.signal_time:
+            raise ValueError("earliest_execution_time must be later than signal_time")
         if self.earliest_execution_time.date() <= self.signal_time.date():
             raise ValueError("earliest_execution_time must be on a later date than signal_time")
         return self
