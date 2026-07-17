@@ -8,7 +8,7 @@ import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
-from math import fsum, isfinite
+from math import fsum, isclose, isfinite
 from typing import Any
 
 from quant_trader.core.models import LLMReview, ReviewAction, SignalIntent, SignalSide
@@ -594,7 +594,9 @@ class V1RulesLLMStrategy:
         drawdown_value = _unit_weight(drawdown, "drawdown")
         weights = self._validated_current_weights(current_weights, rows)
         occupied_weight = fsum([cash, *(weights[ticker] for ticker in sorted(weights))])
-        if occupied_weight > 1.0:
+        if occupied_weight > 1.0 and not isclose(
+            occupied_weight, 1.0, rel_tol=0.0, abs_tol=1e-12
+        ):
             raise ValueError("portfolio aggregate weight must not exceed 1")
         candidates = self._ranked_candidates(rows)
         candidates_by_ticker = {candidate.ticker: candidate for candidate in candidates}
