@@ -1,0 +1,87 @@
+"""Validated immutable workflow contracts."""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from enum import StrEnum
+from typing import Annotated
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+
+NonEmptyText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2_000)
+]
+Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+Ticker = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20)]
+
+
+class ReviewAction(StrEnum):
+    MAINTAIN = "maintain"
+    REDUCE = "reduce"
+    REJECT = "reject"
+
+
+class _ImmutableModel(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class LLMReview(_ImmutableModel):
+    action: ReviewAction
+    weight_multiplier: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+    thesis: NonEmptyText
+    risks: tuple[NonEmptyText, ...] = ()
+    invalidation: NonEmptyText
+    anomalies: tuple[NonEmptyText, ...] = ()
+
+
+class SignalIntent(_ImmutableModel):
+    decision_id: Identifier
+    ticker: Ticker
+    proposed_weight: float = Field(ge=0, le=1)
+    signal_time: datetime
+    earliest_execution_time: datetime
+    stop_price: float = Field(gt=0)
+    invalidation: NonEmptyText
+    reason_codes: tuple[NonEmptyText, ...] = ()
+    strategy_version: Identifier
+    prompt_version: Identifier
+    llm_cache_key: Identifier
+
+    @field_validator("ticker")
+    @classmethod
+    def normalize_ticker(cls, value: str) -> str:
+        return value.upper()
+
+    @field_validator("signal_time", "earliest_execution_time")
+    @classmethod
+    def require_timezone_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("datetime must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def require_execution_after_signal(self) -> SignalIntent:
+        if self.earliest_execution_time <= self.signal_time:
+            raise ValueError("earliest_execution_time must be later than signal_time")
+        return self
+
+
+class ApprovedOrder(_ImmutableModel):
+    decision_id: Identifier
+    ticker: Ticker
+    target_weight: float = Field(ge=0, le=1)
+    execution_date: date
+    reason_codes: tuple[NonEmptyText, ...] = ()
+
+    @field_validator("ticker")
+    @classmethod
+    def normalize_ticker(cls, value: str) -> str:
+        return value.upper()
