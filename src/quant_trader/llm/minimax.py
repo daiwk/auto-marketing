@@ -35,6 +35,8 @@ class _Credential:
     def __repr__(self) -> str:
         return "_Credential('**********')"
 
+    __str__ = __repr__
+
 
 class MiniMaxError(RuntimeError):
     """A safe provider failure that excludes response bodies and credentials."""
@@ -54,7 +56,11 @@ def _raise_minimax_error(
 
 def _request_headers(credential: _Credential) -> dict[str, str]:
     api_key = credential.reveal_for_request()
-    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    return {
+        "Accept-Encoding": "identity",
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
 
 
 def _clear_traceback_frames(error: BaseException) -> None:
@@ -100,6 +106,8 @@ class MiniMaxReviewer:
                 status_code=None,
                 attempts=0,
             )
+        credential = _Credential(key_value)
+        del api_key, key_value
         settings: LLMSettings | None = None
         settings_error = False
         try:
@@ -112,7 +120,7 @@ class MiniMaxReviewer:
         except ValidationError:
             settings_error = True
         if settings_error or settings is None:
-            del api_key, base_url, key_value
+            del base_url, credential
             _raise_minimax_error(
                 "MiniMax connection settings are invalid",
                 "invalid-connection-settings",
@@ -120,7 +128,7 @@ class MiniMaxReviewer:
                 attempts=0,
             )
         if urlsplit(settings.base_url).scheme != "https":
-            del api_key, base_url, key_value, settings
+            del base_url, credential, settings
             _raise_minimax_error(
                 "MiniMax requires an HTTPS base URL",
                 "insecure-base-url",
@@ -149,8 +157,7 @@ class MiniMaxReviewer:
                 attempts=0,
             )
 
-        self._credential = _Credential(key_value)
-        del key_value, api_key
+        self._credential = credential
         self.base_url = settings.base_url
         self.model = settings.model
         self.timeout_seconds = float(settings.timeout_seconds)
@@ -194,6 +201,9 @@ class MiniMaxReviewer:
             failed_attempts = error.attempts
             failed_message = str(error)
             _clear_traceback_frames(error)
+        except Exception as error:
+            _clear_traceback_frames(error)
+            failed_message = "MiniMax request failed safely"
         _raise_minimax_error(
             failed_message,
             "provider-failure",
@@ -286,10 +296,36 @@ class MiniMaxReviewer:
 
     @staticmethod
     def _response_content(response: httpx.Response, attempt: int) -> str:
+        content_encoding = response.headers.get("Content-Encoding", "").strip().lower()
+        if content_encoding not in {"", "identity"}:
+            _raise_minimax_error(
+                "MiniMax response uses an unsupported content encoding",
+                "unsupported-content-encoding",
+                status_code=response.status_code,
+                attempts=attempt,
+            )
+        content_length = response.headers.get("Content-Length")
+        try:
+            declared_length = int(content_length) if content_length is not None else 0
+        except ValueError:
+            declared_length = 0
+        if declared_length > MAX_RESPONSE_BYTES:
+            _raise_minimax_error(
+                "MiniMax response exceeds the allowed size",
+                "response-too-large",
+                status_code=response.status_code,
+                attempts=attempt,
+            )
         body_access_failed = False
         body = bytearray()
         try:
-            for chunk in response.iter_bytes(chunk_size=8_192):
+            # MockTransport may pre-buffer a response; real streamed responses use raw bytes.
+            chunks = (
+                (response.content,)
+                if response.is_stream_consumed
+                else response.iter_raw(chunk_size=8_192)
+            )
+            for chunk in chunks:
                 body.extend(chunk)
                 if len(body) > MAX_RESPONSE_BYTES:
                     break
@@ -367,6 +403,11 @@ def _api_key_value(value: SecretStr | str) -> str:
         result = value
     else:
         raise TypeError("api_key must be a SecretStr or string")
-    if not result.strip():
-        raise ValueError("api_key must be nonblank")
+    if (
+        not result
+        or result != result.strip()
+        or not result.isascii()
+        or any(ord(character) < 0x21 or ord(character) > 0x7E for character in result)
+    ):
+        raise ValueError("api_key must be a nonblank header-safe token")
     return result
