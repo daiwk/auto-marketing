@@ -13,7 +13,7 @@ import typer
 from quant_trader.backtest import buy_and_hold, run_backtest
 from quant_trader.config import load_settings
 from quant_trader.data.cache import ParquetMarketCache
-from quant_trader.data.eastmoney_source import EastMoneySource
+from quant_trader.data.sina_source import SinaSource
 from quant_trader.data.validation import DataValidationError
 from quant_trader.data.yfinance_source import YFinanceSource
 from quant_trader.llm.minimax import MiniMaxReviewer
@@ -29,7 +29,7 @@ app.add_typer(paper_app, name="paper")
 
 
 class MarketSource(StrEnum):
-    EASTMONEY = "eastmoney"
+    SINA = "sina"
     YAHOO = "yahoo"
 
 
@@ -39,11 +39,11 @@ def data_sync(
     start: Annotated[datetime, typer.Option(formats=["%Y-%m-%d"])],
     end: Annotated[datetime, typer.Option(formats=["%Y-%m-%d"])],
     data_root: Annotated[Path, typer.Option()] = Path("data"),
-    source: Annotated[MarketSource, typer.Option()] = MarketSource.EASTMONEY,
+    source: Annotated[MarketSource, typer.Option()] = MarketSource.SINA,
 ) -> None:
     """Download configured symbols into the local cache."""
     settings = load_settings(config)
-    market_source = EastMoneySource() if source is MarketSource.EASTMONEY else YFinanceSource()
+    market_source = SinaSource() if source is MarketSource.SINA else YFinanceSource()
     cache = ParquetMarketCache(data_root)
     try:
         for ticker in settings.universe:

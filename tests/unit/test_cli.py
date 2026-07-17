@@ -14,7 +14,7 @@ def test_data_sync_prints_concise_provider_error(monkeypatch) -> None:
     def fail(*args: object, **kwargs: object) -> None:
         raise DataValidationError("SPY: Yahoo Finance rate limited; wait a few minutes")
 
-    monkeypatch.setattr("quant_trader.cli.EastMoneySource.fetch", fail)
+    monkeypatch.setattr("quant_trader.cli.SinaSource.fetch", fail)
 
     result = CliRunner().invoke(
         app,
@@ -35,14 +35,14 @@ def test_data_sync_prints_concise_provider_error(monkeypatch) -> None:
     assert "Traceback" not in result.output
 
 
-def test_data_sync_uses_eastmoney_by_default(monkeypatch) -> None:
+def test_data_sync_uses_sina_by_default(monkeypatch) -> None:
     calls: list[str] = []
 
     def fetch(_source: object, ticker: str, *args: object) -> object:
         calls.append(ticker)
         return object()
 
-    monkeypatch.setattr("quant_trader.cli.EastMoneySource.fetch", fetch)
+    monkeypatch.setattr("quant_trader.cli.SinaSource.fetch", fetch)
     monkeypatch.setattr(
         "quant_trader.cli.YFinanceSource.fetch",
         lambda *args: (_ for _ in ()).throw(AssertionError("Yahoo should not be called")),

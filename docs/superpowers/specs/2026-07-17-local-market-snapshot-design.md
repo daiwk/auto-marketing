@@ -7,25 +7,25 @@ research snapshot for the configured nine-symbol universe and make future refres
 
 ## Chosen approach
 
-Use Eastmoney's public daily-kline endpoint as the snapshot source. Fetch forward-adjusted daily
+Use Sina Finance's public US daily-kline and reinstatement-factor endpoints as the snapshot source. Fetch forward-adjusted daily
 OHLC and raw volume for `SPY`, `QQQ`, `IWM`, `AAPL`, `MSFT`, `NVDA`, `AMZN`, `GOOGL`, and `META`
 over the half-open interval `[2023-01-01, 2026-01-01)`. The endpoint has already been checked with
 SPY and returned 752 rows through 2025-12-31.
 
-The snapshot is for reproducible research, not a promise that the upstream endpoint will remain
+The snapshot is for reproducible research, not a promise that the upstream endpoints will remain
 available. Source URLs, adjustment mode, retrieval time, covered dates, row counts, and file
 SHA-256 values will be recorded alongside the data.
 
 ## Architecture and data flow
 
-1. `EastMoneySource` maps the nine application tickers to Eastmoney security IDs and downloads
-   daily klines with a bounded timeout.
-2. It converts the response to the existing canonical, timezone-naive `open/high/low/close/volume`
-   frame and passes it through `validate_ohlcv`.
+1. `SinaSource` downloads raw daily klines and per-symbol forward-adjustment factors with bounded
+   timeouts. All nine application tickers use their existing symbols.
+2. It applies Sina's documented formula `adjusted = raw * qfq_factor + adjust`, converts the result
+   to the canonical, timezone-naive `open/high/low/close/volume` frame, and calls `validate_ohlcv`.
 3. `ParquetMarketCache` writes each validated frame and its atomic manifest under `data/market/`.
 4. Those Parquet generations and manifests are committed. Backtest and paper commands continue to
    read through the existing cache API, so no strategy or execution code changes.
-5. `quant-trader data sync` uses Eastmoney by default; Yahoo remains an explicit fallback source.
+5. `quant-trader data sync` uses Sina by default; Yahoo remains an explicit fallback source.
    The README quickstart starts with the checked-in snapshot and does not require a sync.
 
 ## Repository contents
@@ -33,7 +33,7 @@ SHA-256 values will be recorded alongside the data.
 - Nine Parquet files plus their existing cache manifests under `data/market/`.
 - `data/SOURCES.md` with provenance, field mapping, adjustment semantics, date coverage, and a
   research-only disclaimer.
-- A small Eastmoney source adapter and focused tests.
+- A small Sina source adapter and focused tests.
 - `.gitignore` exceptions only for the committed snapshot and provenance file; other generated
   contents under `data/` stay ignored.
 
