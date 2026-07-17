@@ -12,6 +12,7 @@ import typer
 from quant_trader.backtest import buy_and_hold, run_backtest
 from quant_trader.config import load_settings
 from quant_trader.data.cache import ParquetMarketCache
+from quant_trader.data.validation import DataValidationError
 from quant_trader.data.yfinance_source import YFinanceSource
 from quant_trader.llm.minimax import MiniMaxReviewer
 from quant_trader.paper import run_once
@@ -35,9 +36,13 @@ def data_sync(
     """Download configured symbols into the local cache."""
     settings = load_settings(config)
     source, cache = YFinanceSource(), ParquetMarketCache(data_root)
-    for ticker in settings.universe:
-        cache.write(ticker, source.fetch(ticker, start.date(), end.date()))
-        typer.echo(f"cached {ticker}")
+    try:
+        for ticker in settings.universe:
+            cache.write(ticker, source.fetch(ticker, start.date(), end.date()))
+            typer.echo(f"cached {ticker}")
+    except DataValidationError as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from None
 
 
 def _frames(data_root: Path, tickers: tuple[str, ...]) -> dict[str, object]:

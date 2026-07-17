@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from datetime import date
 
 import pandas as pd
 import yfinance
+from yfinance import exceptions as yf_exceptions
+from yfinance import shared
 
 from quant_trader.data.validation import DataValidationError, normalize_ticker, validate_ohlcv
 
@@ -24,20 +27,32 @@ class YFinanceSource:
                 f"{normalized_ticker}: invalid date range {start} to {end}; "
                 "start must be before end"
             )
-        try:
-            raw = yfinance.download(
-                normalized_ticker,
-                start=start,
-                end=end,
-                auto_adjust=True,
-                actions=False,
-                progress=False,
-                threads=False,
-            )
-        except Exception as error:
-            raise DataValidationError(
-                f"{normalized_ticker}: download failed for {start} to {end}"
-            ) from error
+        raw: pd.DataFrame | None = None
+        for attempt in range(3):
+            try:
+                raw = yfinance.download(
+                    normalized_ticker,
+                    start=start,
+                    end=end,
+                    auto_adjust=True,
+                    actions=False,
+                    progress=False,
+                    threads=False,
+                )
+                rate_limited = self._was_rate_limited(normalized_ticker, raw)
+            except yf_exceptions.YFRateLimitError:
+                rate_limited = True
+            except Exception as error:
+                raise DataValidationError(
+                    f"{normalized_ticker}: download failed for {start} to {end}"
+                ) from error
+            if not rate_limited:
+                break
+            if attempt == 2:
+                raise DataValidationError(
+                    f"{normalized_ticker}: Yahoo Finance rate limited; wait a few minutes and retry"
+                )
+            time.sleep(float(2**attempt))
         if not isinstance(raw, pd.DataFrame) or raw.empty:
             raise DataValidationError(f"{normalized_ticker}: empty response for {start} to {end}")
         try:
@@ -60,6 +75,13 @@ class YFinanceSource:
             raise DataValidationError(
                 f"{normalized_ticker}: invalid response for {start} to {end}: {error}"
             ) from error
+
+    @staticmethod
+    def _was_rate_limited(ticker: str, response: object) -> bool:
+        if isinstance(response, pd.DataFrame) and not response.empty:
+            return False
+        provider_error = str(shared._ERRORS.get(ticker, ""))
+        return "YFRateLimitError" in provider_error or "Too Many Requests" in provider_error
 
     @staticmethod
     def _canonical_columns(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
