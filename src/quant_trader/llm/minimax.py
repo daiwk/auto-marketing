@@ -99,7 +99,7 @@ class MiniMaxReviewer:
                     "MiniMax network request failed", status_code=None, attempts=attempt
                 ) from error
 
-            if response.status_code == 429 or response.status_code >= 500:
+            if response.status_code == 429 or 500 <= response.status_code <= 599:
                 status_error = RuntimeError(f"MiniMax returned HTTP {response.status_code}")
                 if self._can_retry(attempt):
                     self._sleeper(self._retry_delay(attempt, response))
@@ -148,27 +148,28 @@ class MiniMaxReviewer:
                 attempts=attempt,
             ) from error
         try:
+            if not isinstance(payload, Mapping):
+                raise TypeError("response JSON root must be an object")
             choices = payload["choices"]
+            if not isinstance(choices, list):
+                raise TypeError("choices must be a list")
             first_choice = choices[0]
-            content = first_choice["message"]["content"]
-        except (IndexError, KeyError, TypeError) as error:
+            if not isinstance(first_choice, Mapping):
+                raise TypeError("choice must be an object")
+            message = first_choice["message"]
+            if not isinstance(message, Mapping):
+                raise TypeError("message must be an object")
+            content = message["content"]
+            if not isinstance(content, str):
+                raise TypeError("content must be a string")
+            if not content.strip():
+                raise ValueError("content must be nonblank")
+        except (IndexError, KeyError, TypeError, ValueError) as error:
             raise MiniMaxError(
-                "MiniMax response did not contain completion content",
+                "MiniMax response did not contain valid completion content",
                 status_code=response.status_code,
                 attempts=attempt,
             ) from error
-        if not isinstance(choices, list) or not isinstance(first_choice, Mapping):
-            raise MiniMaxError(
-                "MiniMax response did not contain completion content",
-                status_code=response.status_code,
-                attempts=attempt,
-            )
-        if not isinstance(content, str) or not content.strip():
-            raise MiniMaxError(
-                "MiniMax response content must be a nonblank string",
-                status_code=response.status_code,
-                attempts=attempt,
-            )
         return content
 
 

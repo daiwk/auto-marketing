@@ -45,7 +45,7 @@ def test_minimax_sends_exact_request_and_does_not_mutate_messages() -> None:
     reviewer.close()
 
 
-@pytest.mark.parametrize("status", [429, 500])
+@pytest.mark.parametrize("status", [429, 500, 599])
 def test_minimax_retries_retryable_http_statuses(status: int) -> None:
     calls = 0
     delays: list[float] = []
@@ -68,6 +68,33 @@ def test_minimax_retries_retryable_http_statuses(status: int) -> None:
     assert reviewer.complete([ChatMessage(role="user", content="x")]) == "{}"
     assert calls == 2
     assert delays == [1]
+
+
+def test_minimax_does_not_retry_non_http_statuses_outside_the_retry_range() -> None:
+    calls = 0
+    delays: list[float] = []
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(600, text="must not be exposed")
+
+    reviewer = MiniMaxReviewer(
+        "secret",
+        "https://api.minimax.io/v1",
+        "model",
+        10,
+        2,
+        transport=httpx.MockTransport(handler),
+        sleeper=delays.append,
+    )
+
+    with pytest.raises(MiniMaxError) as error:
+        reviewer.complete([ChatMessage(role="user", content="x")])
+    assert error.value.status_code == 600
+    assert error.value.attempts == 1
+    assert calls == 1
+    assert delays == []
 
 
 def test_minimax_retries_transport_errors_and_honors_capped_numeric_retry_after() -> None:
@@ -167,17 +194,28 @@ def test_minimax_terminal_exhaustion_and_client_ownership() -> None:
 @pytest.mark.parametrize(
     "bad",
     [
+        {},
+        {"choices": []},
+        {"choices": [{}]},
+        {"choices": [{"message": {}}]},
         {"choices": [{"message": {"content": ""}}]},
         {"choices": [{"message": {"content": 3}}]},
         {"choices": "not-a-list"},
     ],
 )
-def test_minimax_rejects_invalid_success_shape_without_response_leak(bad: object) -> None:
-    reviewer = MiniMaxReviewer(
-        "secret", transport=httpx.MockTransport(lambda _: httpx.Response(200, json=bad))
-    )
+def test_minimax_chains_every_invalid_success_shape_without_response_leak(bad: object) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=bad)
+
+    reviewer = MiniMaxReviewer("secret", max_retries=2, transport=httpx.MockTransport(handler))
     with pytest.raises(MiniMaxError) as error:
         reviewer.complete([{"role": "user", "content": "x"}])
+    assert calls == 1
+    assert error.value.__cause__ is not None
     assert "secret" not in str(error.value)
 
 
