@@ -6,6 +6,6 @@ __pycache__/
 .ruff_cache/
 .superpowers/
 .worktrees/
-data/
+/data/
 reports/
 *.pyc

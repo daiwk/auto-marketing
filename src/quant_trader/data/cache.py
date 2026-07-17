@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
-from hashlib import sha256
 import json
 import os
+from datetime import UTC, date, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -25,9 +25,7 @@ class ParquetMarketCache:
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
 
-    def write(
-        self, ticker: str, frame: pd.DataFrame, retrieved_at: datetime | None = None
-    ) -> None:
+    def write(self, ticker: str, frame: pd.DataFrame, retrieved_at: datetime | None = None) -> None:
         normalized_ticker = self._ticker(ticker)
         try:
             canonical = validate_ohlcv(frame, normalized_ticker)
@@ -126,9 +124,20 @@ class ParquetMarketCache:
 
     def _ensure_directory(self) -> Path:
         directory = self._directory()
-        if not directory.exists():
-            directory.mkdir(parents=True)
-            self._fsync_directory(directory.parent)
+        missing: list[Path] = []
+        current = directory
+        while not current.exists():
+            missing.append(current)
+            if current.parent == current:
+                raise OSError(f"no existing ancestor for cache directory {directory}")
+            current = current.parent
+        for path in reversed(missing):
+            try:
+                path.mkdir()
+            except FileExistsError:
+                if not path.is_dir():
+                    raise
+            self._fsync_directory(path.parent)
         return directory
 
     def _resolve_data_path(self, metadata: dict[str, Any], ticker: str) -> Path:
@@ -183,15 +192,30 @@ class ParquetMarketCache:
     @staticmethod
     def _validate_metadata(metadata: dict[str, Any], ticker: str) -> None:
         expected = {
-            "ticker", "retrieved_at", "max_market_date", "row_count", "schema_version", "generation", "data_file", "sha256"
+            "ticker",
+            "retrieved_at",
+            "max_market_date",
+            "row_count",
+            "schema_version",
+            "generation",
+            "data_file",
+            "sha256",
         }
-        if set(metadata) != expected or type(metadata["ticker"]) is not str or metadata["ticker"] != ticker:
+        if (
+            set(metadata) != expected
+            or type(metadata["ticker"]) is not str
+            or metadata["ticker"] != ticker
+        ):
             raise CacheError(f"{ticker}: corrupt cache metadata")
         if type(metadata["schema_version"]) is not int or metadata["schema_version"] != 1:
             raise CacheError(f"{ticker}: unsupported cache schema version")
         if type(metadata["row_count"]) is not int or metadata["row_count"] <= 0:
             raise CacheError(f"{ticker}: corrupt cache metadata")
-        generation, data_file, digest = metadata["generation"], metadata["data_file"], metadata["sha256"]
+        generation, data_file, digest = (
+            metadata["generation"],
+            metadata["data_file"],
+            metadata["sha256"],
+        )
         if type(generation) is not str or type(data_file) is not str or type(digest) is not str:
             raise CacheError(f"{ticker}: corrupt cache metadata")
         try:
@@ -210,7 +234,10 @@ class ParquetMarketCache:
             timestamp = datetime.fromisoformat(retrieved_at)
             if timestamp.tzinfo is None or timestamp.utcoffset() != UTC.utcoffset(timestamp):
                 raise ValueError
-            if timestamp.isoformat() != retrieved_at or date.fromisoformat(max_market_date).isoformat() != max_market_date:
+            if (
+                timestamp.isoformat() != retrieved_at
+                or date.fromisoformat(max_market_date).isoformat() != max_market_date
+            ):
                 raise ValueError
         except (TypeError, ValueError) as error:
             raise CacheError(f"{ticker}: corrupt cache metadata") from error

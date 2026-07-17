@@ -1,5 +1,5 @@
-from datetime import UTC, datetime
 import json
+from datetime import UTC, datetime
 
 import pandas as pd
 import pytest
@@ -31,7 +31,15 @@ def test_cache_round_trip_uses_immutable_generation_and_defensive_reads(tmp_path
     metadata = cache.read_metadata("SPY")
     loaded.loc[loaded.index[0], "close"] = 999.0
     assert cache.read("SPY").iloc[0]["close"] == 101.0
-    assert metadata | {"generation": metadata["generation"], "data_file": metadata["data_file"], "sha256": metadata["sha256"]} == metadata
+    assert (
+        metadata
+        | {
+            "generation": metadata["generation"],
+            "data_file": metadata["data_file"],
+            "sha256": metadata["sha256"],
+        }
+        == metadata
+    )
     assert metadata["data_file"] == cache.path_for("SPY").name
     assert cache.path_for("SPY").name.startswith("SPY.")
     assert cache.path_for("SPY").suffix == ".parquet"
@@ -43,7 +51,11 @@ def test_cache_failed_generation_write_preserves_previous_manifest(tmp_path, mon
     cache.write("SPY", ohlcv())
     old_metadata = cache.read_metadata("SPY")
     old_data = cache.read("SPY")
-    monkeypatch.setattr(pd.DataFrame, "to_parquet", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "to_parquet",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
     with pytest.raises(CacheError, match="failed to write") as error:
         cache.write("SPY", ohlcv())
     assert isinstance(error.value.__cause__, OSError)
@@ -113,6 +125,30 @@ def test_cache_fsyncs_parent_when_creating_market_directory(tmp_path, monkeypatc
     monkeypatch.setattr(cache, "_fsync_directory", lambda path: synced.append(path))
     cache.write("SPY", ohlcv())
     assert synced == [tmp_path, tmp_path / "market", tmp_path / "market"]
+
+
+def test_cache_fsyncs_each_parent_when_creating_nested_root(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "one" / "two"
+    cache = ParquetMarketCache(root)
+    synced: list[object] = []
+    monkeypatch.setattr(cache, "_fsync_directory", lambda path: synced.append(path))
+    cache.write("SPY", ohlcv())
+    assert synced[:3] == [tmp_path, tmp_path / "one", tmp_path / "one" / "two"]
+
+
+def test_cache_directory_creation_failure_leaves_no_selected_manifest(
+    tmp_path, monkeypatch
+) -> None:
+    cache = ParquetMarketCache(tmp_path / "one" / "two")
+    monkeypatch.setattr(
+        cache, "_fsync_directory", lambda path: (_ for _ in ()).throw(OSError("fsync"))
+    )
+    with pytest.raises(CacheError, match="failed to create cache directory") as error:
+        cache.write("SPY", ohlcv())
+    assert isinstance(error.value.__cause__, OSError)
+    assert not cache.manifest_path_for("SPY").exists()
+    with pytest.raises(CacheError, match="metadata is missing"):
+        cache.read("SPY")
 
 
 def test_cache_rejects_digest_mismatch(tmp_path) -> None:

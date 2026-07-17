@@ -9,7 +9,13 @@ from quant_trader.data.validation import DataValidationError, assert_fresh, vali
 
 def ohlcv() -> pd.DataFrame:
     return pd.DataFrame(
-        {"open": [100.0, 101.0], "high": [102.0, 103.0], "low": [99.0, 100.0], "close": [101.0, 102.0], "volume": [10.0, 20.0]},
+        {
+            "open": [100.0, 101.0],
+            "high": [102.0, 103.0],
+            "low": [99.0, 100.0],
+            "close": [101.0, 102.0],
+            "volume": [10.0, 20.0],
+        },
         index=pd.DatetimeIndex(["2026-01-02", "2026-01-05"], name="date"),
     )
 
@@ -30,7 +36,10 @@ def test_validate_ohlcv_returns_defensive_canonical_copy() -> None:
         (lambda f: f.rename(columns={"close": "Close"}), "columns"),
         (lambda f: f.sort_index(ascending=False), "ascending"),
         (lambda f: pd.concat([f, f.iloc[[0]]]), "unique"),
-        (lambda f: f.set_index(pd.DatetimeIndex(["2026-01-02 12:00", "2026-01-05"])), "market dates"),
+        (
+            lambda f: f.set_index(pd.DatetimeIndex(["2026-01-02 12:00", "2026-01-05"])),
+            "market dates",
+        ),
         (lambda f: f.assign(close=np.nan), "finite"),
         (lambda f: f.assign(close=np.inf), "finite"),
         (lambda f: f.assign(open=0.0), "positive"),

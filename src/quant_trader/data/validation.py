@@ -39,7 +39,9 @@ def validate_ohlcv(
         or not isfinite(max_close_ratio)
         or max_close_ratio <= 1
     ):
-        raise DataValidationError(f"{normalized_ticker}: max_close_ratio must be a finite number above 1")
+        raise DataValidationError(
+            f"{normalized_ticker}: max_close_ratio must be a finite number above 1"
+        )
     if not isinstance(frame, pd.DataFrame):
         raise DataValidationError(f"{normalized_ticker}: OHLCV must be a DataFrame")
     if frame.empty:
@@ -55,7 +57,9 @@ def validate_ohlcv(
     if not frame.index.is_monotonic_increasing:
         raise DataValidationError(f"{normalized_ticker}: OHLCV dates must be ascending")
     if not (frame.index == frame.index.normalize()).all():
-        raise DataValidationError(f"{normalized_ticker}: OHLCV index must contain normalized market dates")
+        raise DataValidationError(
+            f"{normalized_ticker}: OHLCV index must contain normalized market dates"
+        )
     try:
         canonical = frame.astype(float, copy=True)
     except (TypeError, ValueError) as error:
@@ -84,5 +88,6 @@ def assert_fresh(frame: pd.DataFrame, expected_market_date: date, ticker: str) -
     latest = canonical.index[-1].date()
     if latest != expected_market_date:
         raise DataValidationError(
-            f"{normalize_ticker(ticker)}: stale market data; expected {expected_market_date}, got {latest}"
+            f"{normalize_ticker(ticker)}: stale market data; "
+            f"expected {expected_market_date}, got {latest}"
         )

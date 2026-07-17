@@ -21,7 +21,8 @@ class YFinanceSource:
             )
         if start >= end:
             raise DataValidationError(
-                f"{normalized_ticker}: invalid date range {start} to {end}; start must be before end"
+                f"{normalized_ticker}: invalid date range {start} to {end}; "
+                "start must be before end"
             )
         try:
             raw = yfinance.download(
@@ -34,7 +35,9 @@ class YFinanceSource:
                 threads=False,
             )
         except Exception as error:
-            raise DataValidationError(f"{normalized_ticker}: download failed for {start} to {end}") from error
+            raise DataValidationError(
+                f"{normalized_ticker}: download failed for {start} to {end}"
+            ) from error
         if not isinstance(raw, pd.DataFrame) or raw.empty:
             raise DataValidationError(f"{normalized_ticker}: empty response for {start} to {end}")
         try:
@@ -46,8 +49,12 @@ class YFinanceSource:
             frame.index = index.normalize()
             frame.index.name = "date"
             canonical = validate_ohlcv(frame, normalized_ticker)
-            if any(market_date < start or market_date >= end for market_date in canonical.index.date):
-                raise DataValidationError(f"{normalized_ticker}: bars outside requested interval [{start}, {end})")
+            if any(
+                market_date < start or market_date >= end for market_date in canonical.index.date
+            ):
+                raise DataValidationError(
+                    f"{normalized_ticker}: bars outside requested interval [{start}, {end})"
+                )
             return canonical
         except (DataValidationError, KeyError, TypeError, ValueError) as error:
             raise DataValidationError(
@@ -71,7 +78,9 @@ class YFinanceSource:
         if not isinstance(frame.columns, pd.MultiIndex):
             return frame
         matching_levels = [
-            level for level in range(frame.columns.nlevels) if ticker in frame.columns.get_level_values(level)
+            level
+            for level in range(frame.columns.nlevels)
+            if ticker in frame.columns.get_level_values(level)
         ]
         if len(matching_levels) != 1:
             raise DataValidationError(f"{ticker}: unexpected multi-ticker response")
