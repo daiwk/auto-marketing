@@ -2,6 +2,7 @@ from datetime import date, datetime
 
 import pandas as pd
 import pytest
+from yfinance import shared
 
 from quant_trader.data.validation import DataValidationError
 from quant_trader.data.yfinance_source import YFinanceSource
@@ -92,6 +93,46 @@ def test_fetch_wraps_provider_exception_with_ticker_and_range(monkeypatch) -> No
     with pytest.raises(DataValidationError, match="SPY.*2026-01-02.*2026-01-06") as error:
         YFinanceSource().fetch("SPY", date(2026, 1, 2), date(2026, 1, 6))
     assert isinstance(error.value.__cause__, RuntimeError)
+
+
+def test_fetch_retries_rate_limited_empty_response(monkeypatch) -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def download(*args: object, **kwargs: object) -> pd.DataFrame:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            shared._ERRORS["SPY"] = "YFRateLimitError('Too Many Requests')"
+            return pd.DataFrame()
+        return raw_frame()
+
+    monkeypatch.setattr("yfinance.download", download)
+    monkeypatch.setattr("time.sleep", sleeps.append)
+
+    frame = YFinanceSource().fetch("SPY", date(2026, 1, 2), date(2026, 1, 6))
+
+    assert frame.shape == (2, 5)
+    assert calls == 2
+    assert sleeps == [1.0]
+
+
+def test_fetch_reports_rate_limit_after_retries_are_exhausted(monkeypatch) -> None:
+    calls = 0
+
+    def download(*args: object, **kwargs: object) -> pd.DataFrame:
+        nonlocal calls
+        calls += 1
+        shared._ERRORS["SPY"] = "YFRateLimitError('Too Many Requests')"
+        return pd.DataFrame()
+
+    monkeypatch.setattr("yfinance.download", download)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    with pytest.raises(DataValidationError, match="rate limited.*wait a few minutes"):
+        YFinanceSource().fetch("SPY", date(2026, 1, 2), date(2026, 1, 6))
+
+    assert calls == 3
 
 
 def test_fetch_rejects_unexpected_flat_columns(monkeypatch) -> None:
