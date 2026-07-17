@@ -16,8 +16,8 @@ execution:
   slippage_bps: 10
   commission_bps: 1
 llm:
-  base_url: https://api.minimax.io/v1
-  model: MiniMax-M2.7
+  base_url: https://api.minimaxi.com/v1
+  model: MiniMax-M3
   prompt_version: v1
   timeout_seconds: 30
   max_retries: 2

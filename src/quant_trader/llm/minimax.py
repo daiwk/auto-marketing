@@ -97,8 +97,8 @@ class MiniMaxReviewer:
     def __init__(
         self,
         api_key: SecretStr | str,
-        base_url: str = "https://api.minimax.io/v1",
-        model: str = "MiniMax-M2.7",
+        base_url: str = "https://api.minimaxi.com/v1",
+        model: str = "MiniMax-M3",
         timeout_seconds: float = 30,
         max_retries: int = 2,
         *,

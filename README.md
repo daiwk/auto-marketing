@@ -39,3 +39,16 @@ Yahoo remains an explicit fallback via `--source yahoo`. Snapshot provenance and
 Rules-only is the offline/default mode. `backtest --use-llm` is optional and requires
 `MINIMAX_API_KEY`; the LLM can only reduce or reject rules-selected targets. Hard limits remain
 15% per position, 80% gross, long-only/no leverage, with drawdown reduction and a latched halt.
+The default MiniMax settings target the China Token Plan endpoint (`https://api.minimaxi.com/v1`)
+with `MiniMax-M3`. Override `MINIMAX_BASE_URL` and `MINIMAX_MODEL` if your account uses a different
+region or model.
+The bundled three-year backtest can request hundreds of LLM reviews, so first verify your API key
+with a capped smoke run:
+
+```bash
+quant-trader backtest --config configs/default.yaml --data-root data --output run.json \
+  --use-llm --llm-max-reviews 3
+```
+
+The command prints each MiniMax review as it starts and completes. After the cap, remaining reviews
+use local rules-only replies and the output note marks the run as truncated.
