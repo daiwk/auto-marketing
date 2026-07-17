@@ -100,7 +100,14 @@ def rank_candidates(
         max_position_weight,
         max_gross_exposure,
     )
-    eligible = [row for row in rows if isinstance(row, FeatureRow) and _eligible(row, adtv)]
+    try:
+        all_rows = tuple(rows)
+    except TypeError as error:
+        raise TypeError("rows must be an iterable of FeatureRow instances") from error
+    for index, row in enumerate(all_rows):
+        if not isinstance(row, FeatureRow):
+            raise TypeError(f"rows[{index}] must be a FeatureRow")
+    eligible = [row for row in all_rows if _eligible(row, adtv)]
     scored = sorted(
         (
             (

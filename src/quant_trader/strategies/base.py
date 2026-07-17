@@ -14,5 +14,5 @@ class Strategy(Protocol):
     version: str
 
     def generate(
-        self, snapshot: FeatureSnapshot, review: object | None = None
+        self, snapshot: FeatureSnapshot, reviews: object | None = None
     ) -> list[SignalIntent]: ...

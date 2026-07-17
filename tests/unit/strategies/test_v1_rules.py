@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import date
+from inspect import signature
 
 import pytest
 
 from quant_trader.features.snapshot import FeatureRow
+from quant_trader.strategies.base import Strategy
 from quant_trader.strategies.v1_rules_llm.rules import Candidate, rank_candidates
 
 
@@ -39,7 +41,6 @@ def test_ranks_scores_then_ticker_and_limits_count() -> None:
         ("close", 89.0),
         ("return_20", 0.0),
         ("return_60", 0.0),
-        ("return_120", float("nan")),
         ("average_dollar_volume_20", 1.0),
         ("volatility_20", 0.0),
         ("atr_14", 0.0),
@@ -104,3 +105,51 @@ def test_rejects_each_invalid_sizing_parameter(kwargs: dict[str, object]) -> Non
 def test_candidate_rejects_non_finite_or_non_numeric_values(value: object) -> None:
     with pytest.raises(ValueError):
         Candidate("AAA", value, 0.2, 2, 100, 0.1)
+
+
+def test_rank_boundary_rejects_mixed_and_invalid_row_values() -> None:
+    with pytest.raises(TypeError, match="FeatureRow"):
+        rank_candidates([row(), {"ticker": "BBB"}])  # type: ignore[list-item]
+    with pytest.raises(TypeError, match="FeatureRow"):
+        rank_candidates([object()])  # type: ignore[list-item]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "close",
+        "sma_200",
+        "return_20",
+        "return_60",
+        "return_120",
+        "volatility_20",
+        "atr_14",
+        "average_dollar_volume_20",
+    ],
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), "not-a-number", True])
+def test_feature_row_rejects_invalid_numeric_fields(field: str, value: object) -> None:
+    with pytest.raises(ValueError):
+        row(**{field: value})  # type: ignore[arg-type]
+
+
+def test_rank_accepts_immutable_finite_but_ineligible_row() -> None:
+    ineligible = row(return_20=0.0)
+    assert rank_candidates((ineligible,)) == []
+
+
+@pytest.mark.parametrize("observations", [0, -1, "260"])
+def test_feature_row_rejects_invalid_observations(observations: object) -> None:
+    with pytest.raises(ValueError):
+        row(observations=observations)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("weight", [-0.1, 1.1, float("nan"), "0.1"])
+def test_candidate_rejects_invalid_base_weight(weight: object) -> None:
+    with pytest.raises(ValueError):
+        Candidate("AAA", 1, 0.2, 2, 100, weight)  # type: ignore[arg-type]
+
+
+def test_strategy_protocol_uses_plural_reviews_keyword() -> None:
+    assert "reviews" in signature(Strategy.generate).parameters
+    assert "review" not in signature(Strategy.generate).parameters

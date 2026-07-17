@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from math import isfinite
 from types import MappingProxyType
 
 import pandas as pd
@@ -57,8 +58,8 @@ class FeatureRow:
             "average_dollar_volume_20",
         ):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                raise ValueError(f"{name} must be numeric")
+            if isinstance(value, bool) or not isinstance(value, int | float) or not isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
             object.__setattr__(self, name, float(value))
 
 
@@ -81,30 +82,40 @@ def build_feature_snapshot(
     point_in_time = _as_timestamp(as_of)
     if not isinstance(market_frames, Mapping):
         raise ValueError("market_frames must be a mapping")
-    rows: dict[str, FeatureRow] = {}
-    skipped: dict[str, str] = {}
-    for raw_ticker in sorted(market_frames):
+    normalized_frames: list[tuple[str, pd.DataFrame]] = []
+    seen_tickers: set[str] = set()
+    for raw_ticker, frame in market_frames.items():
         ticker = normalize_ticker(raw_ticker)
-        frame = market_frames[raw_ticker]
+        if ticker in seen_tickers:
+            raise ValueError(f"duplicate canonical ticker: {ticker}")
+        seen_tickers.add(ticker)
         if not isinstance(frame, pd.DataFrame):
             raise ValueError(f"{ticker}: OHLCV must be a DataFrame")
+        normalized_frames.append((ticker, frame))
+
+    rows: dict[str, FeatureRow] = {}
+    skipped: dict[str, str] = {}
+    for ticker, frame in sorted(normalized_frames):
         if not isinstance(frame.index, pd.DatetimeIndex) or point_in_time not in frame.index:
             skipped[ticker] = "missing exact bar on as_of"
             continue
         canonical = validate_ohlcv(frame.loc[:point_in_time], ticker)
         features = technical_features(canonical.loc[:point_in_time], ticker)
         latest = features.loc[point_in_time]
-        rows[ticker] = FeatureRow(
-            ticker=ticker,
-            as_of=point_in_time,
-            observations=len(features),
-            close=latest["close"],
-            sma_200=latest["sma_200"],
-            return_20=latest["return_20"],
-            return_60=latest["return_60"],
-            return_120=latest["return_120"],
-            volatility_20=latest["volatility_20"],
-            atr_14=latest["atr_14"],
-            average_dollar_volume_20=latest["average_dollar_volume_20"],
-        )
+        try:
+            rows[ticker] = FeatureRow(
+                ticker=ticker,
+                as_of=point_in_time,
+                observations=len(features),
+                close=latest["close"],
+                sma_200=latest["sma_200"],
+                return_20=latest["return_20"],
+                return_60=latest["return_60"],
+                return_120=latest["return_120"],
+                volatility_20=latest["volatility_20"],
+                atr_14=latest["atr_14"],
+                average_dollar_volume_20=latest["average_dollar_volume_20"],
+            )
+        except ValueError:
+            skipped[ticker] = "incomplete feature history"
     return FeatureSnapshot(point_in_time, rows, skipped)

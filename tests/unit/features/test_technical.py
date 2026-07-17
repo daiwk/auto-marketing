@@ -57,6 +57,13 @@ def test_calculates_exact_features_without_mutating_input() -> None:
         axis=1,
     ).max(axis=1)
     pd.testing.assert_series_equal(result["return_20"], expected_return, check_names=False)
+    for period in (60, 120):
+        expected = frame["close"].pct_change(period, fill_method=None)
+        first_available = frame.index[period]
+        assert result.loc[first_available, f"return_{period}"] == pytest.approx(
+            expected.loc[first_available]
+        )
+        assert result.loc[frame.index[-1], f"return_{period}"] == pytest.approx(expected.iloc[-1])
     pd.testing.assert_series_equal(result["volatility_20"], expected_volatility, check_names=False)
     pd.testing.assert_series_equal(
         result["atr_14"], true_range.rolling(14, min_periods=14).mean(), check_names=False
@@ -65,6 +72,29 @@ def test_calculates_exact_features_without_mutating_input() -> None:
         frame["close"].iloc[:200].mean()
     )
     assert np.isnan(result.loc[frame.index[18], "volatility_20"])
+    expected_adtv = (frame["close"] * frame["volume"]).rolling(20, min_periods=20).mean()
+    pd.testing.assert_series_equal(
+        result["average_dollar_volume_20"], expected_adtv, check_names=False
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "first_available"),
+    [
+        ("sma_200", 199),
+        ("return_20", 20),
+        ("return_60", 60),
+        ("return_120", 120),
+        ("volatility_20", 20),
+        ("atr_14", 13),
+        ("average_dollar_volume_20", 19),
+    ],
+)
+def test_feature_warmup_boundaries_are_exact(column: str, first_available: int) -> None:
+    result = technical_features(bars(), "ABC")
+
+    assert np.isfinite(result[column].iloc[first_available])
+    assert result[column].iloc[:first_available].isna().all()
 
 
 def test_future_rows_cannot_change_existing_features() -> None:

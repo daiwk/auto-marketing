@@ -46,6 +46,28 @@ def test_snapshot_never_reads_future_prices() -> None:
     assert before.rows["ABC"] == after.rows["ABC"]
 
 
+def test_snapshot_skips_an_exact_bar_without_complete_feature_history() -> None:
+    frame = bars(100)
+    snapshot = build_feature_snapshot({"ABC": frame}, frame.index[-1])
+
+    assert snapshot.rows == {}
+    assert snapshot.skipped == {"ABC": "incomplete feature history"}
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [
+        lambda frame, as_of: {"ABC": frame, "abc": frame},
+        lambda frame, as_of: {"ABC": frame, "abc": frame.drop(as_of)},
+    ],
+)
+def test_snapshot_rejects_normalized_ticker_collisions(frames: object) -> None:
+    frame = bars()
+    as_of = frame.index[-1]
+    with pytest.raises(ValueError, match="duplicate canonical ticker"):
+        build_feature_snapshot(frames(frame, as_of), as_of)  # type: ignore[operator]
+
+
 @pytest.mark.parametrize(
     "as_of", ["2024-01-02", pd.Timestamp("2024-01-02 12:00"), pd.Timestamp("2024-01-02", tz="UTC")]
 )
