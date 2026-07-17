@@ -82,6 +82,22 @@ def test_llm_review_accepts_input_anomalies_and_rejects_legacy_anomalies() -> No
         )
 
 
+@pytest.mark.parametrize("field", ["risks", "input_anomalies"])
+def test_llm_review_bounds_list_cardinality(field: str) -> None:
+    payload = {
+        "action": "reduce",
+        "weight_multiplier": 0.5,
+        "confidence": 0.5,
+        "thesis": "trend",
+        "risks": [],
+        "invalidation": "break",
+        "input_anomalies": [],
+    }
+    payload[field] = ["item"] * 21
+    with pytest.raises(ValidationError):
+        LLMReview(**payload)
+
+
 def test_signal_intent_rejects_naive_datetimes() -> None:
     now = datetime(2026, 1, 2, 10, 0)
     with pytest.raises(ValidationError, match="timezone-aware"):

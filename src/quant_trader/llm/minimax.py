@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn
 from urllib.parse import urlsplit
@@ -13,11 +14,26 @@ import httpx
 from pydantic import SecretStr, ValidationError
 
 from quant_trader.config import LLMSettings
-from quant_trader.llm.base import MessageInput, SanitizedLLMCause, canonical_messages
+from quant_trader.llm.base import ChatMessage, MessageInput, SanitizedLLMCause, canonical_messages
 
 _MAX_RETRY_AFTER_SECONDS = 60.0
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_COMPLETION_CHARS = 16 * 1024
+
+
+class _Credential:
+    """Keeps a credential out of ordinary instance dictionaries and repr output."""
+
+    __slots__ = ("__value",)
+
+    def __init__(self, value: str) -> None:
+        self.__value = value
+
+    def reveal_for_request(self) -> str:
+        return self.__value
+
+    def __repr__(self) -> str:
+        return "_Credential('**********')"
 
 
 class MiniMaxError(RuntimeError):
@@ -34,6 +50,25 @@ def _raise_minimax_error(
 ) -> NoReturn:
     cause = SanitizedLLMCause(category, status_code=status_code, attempts=attempts)
     raise MiniMaxError(message, status_code=status_code, attempts=attempts) from cause
+
+
+def _request_headers(credential: _Credential) -> dict[str, str]:
+    api_key = credential.reveal_for_request()
+    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+
+def _clear_traceback_frames(error: BaseException) -> None:
+    seen: set[int] = set()
+
+    def clear(current: BaseException | None) -> None:
+        if current is None or id(current) in seen:
+            return
+        seen.add(id(current))
+        traceback.clear_frames(current.__traceback__)
+        clear(current.__cause__)
+        clear(current.__context__)
+
+    clear(error)
 
 
 class MiniMaxReviewer:
@@ -58,13 +93,13 @@ class MiniMaxReviewer:
         except (TypeError, ValueError):
             key_error = True
         if key_error:
+            del api_key, base_url, key_value
             _raise_minimax_error(
                 "MiniMax connection settings are invalid",
                 "invalid-api-key",
                 status_code=None,
                 attempts=0,
             )
-        self._api_key = key_value
         settings: LLMSettings | None = None
         settings_error = False
         try:
@@ -77,6 +112,7 @@ class MiniMaxReviewer:
         except ValidationError:
             settings_error = True
         if settings_error or settings is None:
+            del api_key, base_url, key_value
             _raise_minimax_error(
                 "MiniMax connection settings are invalid",
                 "invalid-connection-settings",
@@ -84,6 +120,7 @@ class MiniMaxReviewer:
                 attempts=0,
             )
         if urlsplit(settings.base_url).scheme != "https":
+            del api_key, base_url, key_value, settings
             _raise_minimax_error(
                 "MiniMax requires an HTTPS base URL",
                 "insecure-base-url",
@@ -112,6 +149,8 @@ class MiniMaxReviewer:
                 attempts=0,
             )
 
+        self._credential = _Credential(key_value)
+        del key_value, api_key
         self.base_url = settings.base_url
         self.model = settings.model
         self.timeout_seconds = float(settings.timeout_seconds)
@@ -133,7 +172,36 @@ class MiniMaxReviewer:
             self.client.close()
 
     def complete(self, messages: Sequence[MessageInput]) -> str:
-        canonical = canonical_messages(messages)
+        invalid_messages = False
+        invalid_message_text = "messages are invalid"
+        try:
+            canonical = canonical_messages(messages)
+        except (TypeError, ValueError) as error:
+            invalid_message_text = str(error)
+            _clear_traceback_frames(error)
+            invalid_messages = True
+        if invalid_messages:
+            del messages
+            raise ValueError(invalid_message_text) from SanitizedLLMCause("invalid-message")
+        del messages
+        failed_status: int | None = None
+        failed_attempts = 0
+        failed_message = "MiniMax request failed safely"
+        try:
+            return self._complete_request(canonical)
+        except MiniMaxError as error:
+            failed_status = error.status_code
+            failed_attempts = error.attempts
+            failed_message = str(error)
+            _clear_traceback_frames(error)
+        _raise_minimax_error(
+            failed_message,
+            "provider-failure",
+            status_code=failed_status,
+            attempts=failed_attempts,
+        )
+
+    def _complete_request(self, canonical: tuple[ChatMessage, ...]) -> str:
         payload = {
             "max_completion_tokens": 1200,
             "messages": [message.model_dump(mode="json") for message in canonical],
@@ -141,17 +209,46 @@ class MiniMaxReviewer:
             "stream": False,
             "temperature": 0.1,
         }
-        headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+        headers = _request_headers(self._credential)
         for attempt in range(1, self.max_retries + 2):
             transport_failure = False
+            retry_delay: float | None = None
             try:
-                response = self.client.post(
+                with self.client.stream(
+                    "POST",
                     self._endpoint,
                     json=payload,
                     headers=headers,
                     timeout=self.timeout_seconds,
                     follow_redirects=False,
-                )
+                ) as response:
+                    if response.status_code == 429 or 500 <= response.status_code <= 599:
+                        if self._can_retry(attempt):
+                            retry_delay = self._retry_delay(attempt, response)
+                        else:
+                            status_message = (
+                                "MiniMax request failed "
+                                f"(status={response.status_code}, attempts={attempt})"
+                            )
+                            _raise_minimax_error(
+                                status_message,
+                                "retryable-http-status",
+                                status_code=response.status_code,
+                                attempts=attempt,
+                            )
+                    elif not 200 <= response.status_code < 300:
+                        status_message = (
+                            "MiniMax request failed "
+                            f"(status={response.status_code}, attempts={attempt})"
+                        )
+                        _raise_minimax_error(
+                            status_message,
+                            "http-status",
+                            status_code=response.status_code,
+                            attempts=attempt,
+                        )
+                    else:
+                        return self._response_content(response, attempt)
             except httpx.TransportError:
                 transport_failure = True
             if transport_failure:
@@ -164,25 +261,9 @@ class MiniMaxReviewer:
                     status_code=None,
                     attempts=attempt,
                 )
-
-            if response.status_code == 429 or 500 <= response.status_code <= 599:
-                if self._can_retry(attempt):
-                    self._sleeper(self._retry_delay(attempt, response))
-                    continue
-                _raise_minimax_error(
-                    f"MiniMax request failed (status={response.status_code}, attempts={attempt})",
-                    "retryable-http-status",
-                    status_code=response.status_code,
-                    attempts=attempt,
-                )
-            if not 200 <= response.status_code < 300:
-                _raise_minimax_error(
-                    f"MiniMax request failed (status={response.status_code}, attempts={attempt})",
-                    "http-status",
-                    status_code=response.status_code,
-                    attempts=attempt,
-                )
-            return self._response_content(response, attempt)
+            if retry_delay is not None:
+                self._sleeper(retry_delay)
+                continue
         raise AssertionError("unreachable")
 
     def _can_retry(self, attempt: int) -> bool:
@@ -206,9 +287,12 @@ class MiniMaxReviewer:
     @staticmethod
     def _response_content(response: httpx.Response, attempt: int) -> str:
         body_access_failed = False
-        response_size = 0
+        body = bytearray()
         try:
-            response_size = len(response.content)
+            for chunk in response.iter_bytes(chunk_size=8_192):
+                body.extend(chunk)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    break
         except Exception:
             body_access_failed = True
         if body_access_failed:
@@ -218,7 +302,7 @@ class MiniMaxReviewer:
                 status_code=response.status_code,
                 attempts=attempt,
             )
-        if response_size > MAX_RESPONSE_BYTES:
+        if len(body) > MAX_RESPONSE_BYTES:
             _raise_minimax_error(
                 "MiniMax response exceeds the allowed size",
                 "response-too-large",
@@ -228,7 +312,7 @@ class MiniMaxReviewer:
         invalid_json = False
         payload: Any = None
         try:
-            payload = response.json()
+            payload = json.loads(bytes(body).decode("utf-8"))
         except (ValueError, UnicodeError, json.JSONDecodeError, RecursionError):
             invalid_json = True
         if invalid_json:

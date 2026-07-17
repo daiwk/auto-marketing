@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from quant_trader.core.models import ReviewAction
-from quant_trader.llm.parsing import LLMResponseError, parse_review
+from quant_trader.llm.parsing import (
+    MAX_JSON_NESTING,
+    MAX_PARSE_BYTES,
+    MAX_PARSE_CHARS,
+    LLMResponseError,
+    parse_review,
+)
 
 VALID = (
     '{"action":"reduce","weight_multiplier":0.5,"confidence":0.6,'
@@ -49,3 +55,24 @@ def test_parse_review_rejects_unsafe_or_invalid_responses(content: str) -> None:
         parse_review(content)
 
     assert VALID not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "x" * (MAX_PARSE_CHARS + 1),
+        "é" * (MAX_PARSE_BYTES // 2 + 1),
+        "[" * (MAX_JSON_NESTING + 1) + "0" + "]" * (MAX_JSON_NESTING + 1),
+        '{"action":"reduce","weight_multiplier":0.5,"confidence":0.5,'
+        '"thesis":"ok","risks":[' + ",".join('"r"' for _ in range(21)) + "],"
+        '"invalidation":"break","input_anomalies":[]}',
+        '{"action":"reduce","weight_multiplier":0.5,"confidence":0.5,'
+        '"thesis":"ok","risks":[],"invalidation":"break","input_anomalies":['
+        + ",".join('"a"' for _ in range(21))
+        + "]}",
+    ],
+)
+def test_parse_review_rejects_oversized_deep_or_overfull_input(content: str) -> None:
+    with pytest.raises(LLMResponseError) as error:
+        parse_review(content)
+    assert error.value.__cause__ is not None

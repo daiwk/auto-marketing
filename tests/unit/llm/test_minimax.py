@@ -18,6 +18,21 @@ def response(content: str = "{}") -> httpx.Response:
     return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
 
+class CountingStream(httpx.SyncByteStream):
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.yielded_bytes = 0
+        self.closed = False
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        for chunk in self.chunks:
+            self.yielded_bytes += len(chunk)
+            yield chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def test_minimax_sends_exact_request_and_does_not_mutate_messages() -> None:
     seen: list[httpx.Request] = []
 
@@ -314,6 +329,39 @@ def test_minimax_rejects_empty_messages_without_making_a_request() -> None:
     with pytest.raises(ValueError, match="at least one"):
         reviewer.complete([])
     assert calls == 0
+
+
+def test_minimax_streams_bounded_bodies_and_closes_every_response() -> None:
+    success_stream = CountingStream([response("ok").content])
+    oversize_stream = CountingStream([b"x" * 8_192] * ((MAX_RESPONSE_BYTES // 8_192) + 200))
+    retry_stream = CountingStream([b"ignored"])
+    retry_success_stream = CountingStream([response("retry-ok").content])
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(200, stream=success_stream)
+        if calls == 2:
+            return httpx.Response(200, stream=oversize_stream)
+        if calls == 3:
+            return httpx.Response(503, stream=retry_stream)
+        return httpx.Response(200, stream=retry_success_stream)
+
+    reviewer = MiniMaxReviewer(
+        "secret", max_retries=1, transport=httpx.MockTransport(handler), sleeper=lambda _: None
+    )
+    assert reviewer.complete([{"role": "user", "content": "x"}]) == "ok"
+    with pytest.raises(MiniMaxError):
+        reviewer.complete([{"role": "user", "content": "x"}])
+    assert reviewer.complete([{"role": "user", "content": "x"}]) == "retry-ok"
+
+    assert success_stream.closed
+    assert oversize_stream.closed
+    assert retry_stream.closed
+    assert retry_success_stream.closed
+    assert oversize_stream.yielded_bytes <= MAX_RESPONSE_BYTES + 8_192
 
 
 def test_minimax_rejects_invalid_constructor_values() -> None:

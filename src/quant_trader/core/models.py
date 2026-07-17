@@ -44,9 +44,9 @@ class LLMReview(_ImmutableModel):
     weight_multiplier: StrictNumber = Field(ge=0, le=1)
     confidence: StrictNumber = Field(ge=0, le=1)
     thesis: NonEmptyText
-    risks: tuple[NonEmptyText, ...] = ()
+    risks: Annotated[tuple[NonEmptyText, ...], Field(max_length=20)] = ()
     invalidation: NonEmptyText
-    input_anomalies: tuple[NonEmptyText, ...] = ()
+    input_anomalies: Annotated[tuple[NonEmptyText, ...], Field(max_length=20)] = ()
 
 
 class SignalIntent(_ImmutableModel):

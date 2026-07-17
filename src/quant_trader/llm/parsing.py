@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from collections.abc import Iterable
 from typing import Any, NoReturn
 
@@ -11,6 +12,10 @@ from pydantic import ValidationError
 from quant_trader.core.models import LLMReview
 from quant_trader.llm.base import SanitizedLLMCause
 
+MAX_PARSE_CHARS = 64 * 1024
+MAX_PARSE_BYTES = 64 * 1024
+MAX_JSON_NESTING = 20
+
 
 class LLMResponseError(ValueError):
     """The provider response is not one valid, schema-conforming review."""
@@ -18,6 +23,14 @@ class LLMResponseError(ValueError):
 
 def _raise_response_error(message: str, category: str) -> NoReturn:
     raise LLMResponseError(message) from SanitizedLLMCause(category)
+
+
+def _clear_traceback_frames(error: BaseException) -> None:
+    traceback.clear_frames(error.__traceback__)
+    if error.__cause__ is not None:
+        traceback.clear_frames(error.__cause__.__traceback__)
+    if error.__context__ is not None:
+        traceback.clear_frames(error.__context__.__traceback__)
 
 
 def _reject_json_constant(_: str) -> None:
@@ -71,14 +84,45 @@ def _contains_unsafe_text(value: Any) -> bool:
     return False
 
 
-def parse_review(content: str) -> LLMReview:
+def _json_depth_exceeds_limit(content: str) -> bool:
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in content:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_JSON_NESTING:
+                return True
+        elif character in "]}":
+            depth -= 1
+    return False
+
+
+def _parse_review(content: str) -> LLMReview:
     """Parse exactly one JSON object, optionally after MiniMax reasoning or in a JSON fence."""
     if not isinstance(content, str) or not content.strip():
         _raise_response_error("response must be a nonblank string", "blank-response")
+    input_too_large = len(content) > MAX_PARSE_CHARS
+    try:
+        input_too_large = input_too_large or len(content.encode("utf-8")) > MAX_PARSE_BYTES
+    except UnicodeError:
+        input_too_large = True
+    if input_too_large:
+        _raise_response_error("response exceeds the allowed size", "response-too-large")
     candidate = _unfence(_remove_think_prefix(content))
     if not candidate:
         _raise_response_error("response has no JSON review", "missing-review")
-    invalid_json = False
+    invalid_json = _json_depth_exceeds_limit(candidate)
     parsed: object = None
     try:
         parsed = json.loads(
@@ -103,3 +147,15 @@ def parse_review(content: str) -> LLMReview:
         _raise_response_error("response JSON does not match the review schema", "invalid-schema")
     assert review is not None
     return review
+
+
+def parse_review(content: str) -> LLMReview:
+    """Public parse boundary that retains no untrusted model text in traceback locals on failure."""
+    message = "response JSON does not match the review schema"
+    try:
+        return _parse_review(content)
+    except LLMResponseError as error:
+        message = str(error)
+        _clear_traceback_frames(error)
+    del content
+    _raise_response_error(message, "public-parse-failure")

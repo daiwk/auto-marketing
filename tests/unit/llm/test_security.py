@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from json import JSONDecodeError
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,6 +14,7 @@ from quant_trader.llm.parsing import LLMResponseError, parse_review
 _KEY = "security-test-api-key-DO-NOT-EXPOSE"
 _URL = "https://user:security-test-url-token@api.minimax.io/v1?key=security-test-url-token"
 _BODY = "security-test-response-body-DO-NOT-EXPOSE"
+_LIBRARY_ROOT = Path(__file__).parents[3] / "src" / "quant_trader"
 
 
 def _assert_sanitized_exception_graph(error: BaseException, *forbidden: str) -> None:
@@ -21,6 +23,8 @@ def _assert_sanitized_exception_graph(error: BaseException, *forbidden: str) -> 
     def inspect_value(value: Any) -> None:
         if isinstance(value, str):
             assert all(token not in value for token in forbidden)
+        elif isinstance(value, httpx.Request | httpx.Response | JSONDecodeError):
+            pytest.fail(f"unsafe object retained: {type(value).__name__}")
         elif isinstance(value, Mapping):
             for key, item in value.items():
                 inspect_value(key)
@@ -43,7 +47,26 @@ def _assert_sanitized_exception_graph(error: BaseException, *forbidden: str) -> 
         inspect_exception(current.__cause__)
         inspect_exception(current.__context__)
 
+    def inspect_library_traceback(current: BaseException | None) -> None:
+        if current is None:
+            return
+        traceback = current.__traceback__
+        while traceback is not None:
+            frame = traceback.tb_frame
+            filename = Path(frame.f_code.co_filename)
+            if _LIBRARY_ROOT in filename.parents:
+                inspect_value(frame.f_locals)
+                for value in frame.f_locals.values():
+                    try:
+                        inspect_value(vars(value))
+                    except TypeError:
+                        pass
+            traceback = traceback.tb_next
+        inspect_library_traceback(current.__cause__)
+        inspect_library_traceback(current.__context__)
+
     inspect_exception(error)
+    inspect_library_traceback(error)
 
 
 def test_constructor_validation_and_http_base_url_are_sanitized_and_fail_closed() -> None:
@@ -98,3 +121,13 @@ def test_invalid_caller_message_does_not_chain_its_content() -> None:
     with pytest.raises(ValueError) as error:
         reviewer.complete([{"role": "user", "content": "x", "untrusted": _BODY}])
     _assert_sanitized_exception_graph(error.value, _KEY, _URL, _BODY)
+
+
+def test_provider_failure_clears_library_traceback_locals() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(_BODY, request=request)
+
+    reviewer = MiniMaxReviewer(_KEY, max_retries=0, transport=httpx.MockTransport(handler))
+    with pytest.raises(MiniMaxError) as error:
+        reviewer.complete([{"role": "user", "content": "x"}])
+    _assert_sanitized_exception_graph(error.value, _KEY, _URL, _BODY, "Authorization")
