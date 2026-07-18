@@ -15,6 +15,7 @@ from quant_trader.strategies.v2_multi_agent.models import (
     TraderProposal,
     VisibleContext,
 )
+from quant_trader.strategies.v2_multi_agent.orchestrator import TradingAgentsReviewer
 
 __all__ = [
     "DecisionTrace",
@@ -24,6 +25,7 @@ __all__ = [
     "RoleReport",
     "Stance",
     "TraderProposal",
+    "TradingAgentsReviewer",
     "VisibleContext",
     "context_for",
     "load_external_context",
