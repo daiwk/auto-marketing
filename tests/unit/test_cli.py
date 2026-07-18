@@ -17,6 +17,7 @@ class FakeDashboardState:
 
     def __init__(self) -> None:
         self.statuses: list[str] = []
+        self.preparations: list[tuple[str, str, str]] = []
         self.instances.append(self)
 
     def publish(self, event: object) -> None:
@@ -25,6 +26,10 @@ class FakeDashboardState:
     def set_command_status(self, status: str, *, reason: str | None = None) -> int:
         self.statuses.append(status)
         return len(self.statuses)
+
+    def prepare(self, ticker: str, as_of: str, provider: str) -> int:
+        self.preparations.append((ticker, as_of, provider))
+        return len(self.preparations)
 
     def wait_until_seen(self, version: int, *, timeout_seconds: float) -> bool:
         return True
@@ -125,6 +130,9 @@ def test_agents_analyze_dashboard_runs_lifecycle_without_provider(
     assert FakeDashboardServer.instances[-1].started is True
     assert FakeDashboardServer.instances[-1].stopped is True
     assert FakeDashboardState.instances[-1].statuses[-1] == "completed"
+    assert FakeDashboardState.instances[-1].preparations == [
+        ("AAPL", "2023-01-03", "MiniMax")
+    ]
 
 
 def test_dashboard_requires_trading_agents_backtest(tmp_path: Path) -> None:
@@ -224,6 +232,85 @@ def test_agents_dashboard_closes_on_keyboard_interrupt(
 
     assert result.exit_code == 130
     assert FakeDashboardState.instances[-1].statuses[-1] == "stopped"
+    assert FakeDashboardServer.instances[-1].stopped is True
+
+
+def test_dashboard_wait_and_stop_failures_do_not_change_valid_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class BrokenAuxiliaryState(FakeDashboardState):
+        def wait_until_seen(self, version: int, *, timeout_seconds: float) -> bool:
+            raise RuntimeError("browser disconnected")
+
+    class BrokenStopServer(FakeDashboardServer):
+        def stop(self) -> None:
+            self.stopped = True
+            raise RuntimeError("server shutdown failed")
+
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.setattr("quant_trader.cli.DashboardState", BrokenAuxiliaryState)
+    monkeypatch.setattr("quant_trader.cli.DashboardServer", BrokenStopServer)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "analyze",
+            "--ticker",
+            "AAPL",
+            "--as-of",
+            "2023-01-03",
+            "--config",
+            "configs/default.yaml",
+            "--data-root",
+            "data",
+            "--output",
+            str(tmp_path / "analysis.json"),
+            "--dashboard",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_backtest_dashboard_closes_on_unexpected_simulation_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeProvider:
+        def complete(self, messages: tuple[ChatMessage, ...]) -> str:
+            return MaintainReviewer().complete(messages)
+
+    _fake_dashboard(monkeypatch)
+    monkeypatch.setattr(
+        "quant_trader.cli._open_provider",
+        lambda *args: (FakeProvider(), None, "Codex"),
+    )
+    monkeypatch.setattr(
+        "quant_trader.cli.run_backtest",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("simulation bug")),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "--config",
+            "configs/default.yaml",
+            "--data-root",
+            "data",
+            "--output",
+            str(tmp_path / "run.json"),
+            "--use-llm",
+            "--llm-provider",
+            "codex",
+            "--llm-workflow",
+            "trading-agents",
+            "--dashboard",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert FakeDashboardState.instances[-1].statuses[-1] == "failed"
     assert FakeDashboardServer.instances[-1].stopped is True
 
 

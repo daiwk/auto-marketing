@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import date
 
 import httpx
+import pytest
 
 from quant_trader.core.models import LLMReview, ReviewAction
-from quant_trader.dashboard import DashboardServer, DashboardState
+from quant_trader.dashboard import DashboardError, DashboardServer, DashboardState
 from quant_trader.dashboard_template import DASHBOARD_HTML
 from quant_trader.strategies.v2_multi_agent import (
     AgentEvent,
@@ -82,6 +83,25 @@ def test_dashboard_state_projects_workflow_events_and_versions() -> None:
     assert final["workflow"]["final_review"]["action"] == "reduce"  # type: ignore[index]
 
 
+def test_failed_role_keeps_the_workflow_failed_after_completion() -> None:
+    state = DashboardState()
+    state.publish(_event(AgentEventKind.WORKFLOW_STARTED))
+    failed = _report(RoleName.MARKET, ReportStatus.FAILED)
+    state.publish(
+        _event(
+            AgentEventKind.ROLE_FAILED,
+            role=RoleName.MARKET,
+            report=failed,
+        )
+    )
+    state.publish(_event(AgentEventKind.WORKFLOW_COMPLETED, final_review=_review()))
+
+    workflow = state.snapshot()["workflow"]
+
+    assert workflow["status"] == "failed"  # type: ignore[index]
+    assert workflow["failure_role"] == RoleName.MARKET.value  # type: ignore[index]
+
+
 def test_dashboard_server_exposes_only_tokenized_fixed_routes() -> None:
     state = DashboardState()
     opened: list[str] = []
@@ -118,6 +138,36 @@ def test_state_endpoint_acknowledges_the_rendered_version() -> None:
         server.stop()
 
 
+def test_partial_server_start_closes_bound_socket_and_sanitizes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BoundServer:
+        server_address = ("127.0.0.1", 12345)
+        closed = False
+
+        def serve_forever(self) -> None:
+            return None
+
+        def server_close(self) -> None:
+            self.closed = True
+
+    class BrokenThread:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def start(self) -> None:
+            raise RuntimeError("thread detail must not leak")
+
+    bound = BoundServer()
+    monkeypatch.setattr("quant_trader.dashboard.ThreadingHTTPServer", lambda *args: bound)
+    monkeypatch.setattr("quant_trader.dashboard.threading.Thread", BrokenThread)
+
+    with pytest.raises(DashboardError, match="local dashboard could not start"):
+        DashboardServer(DashboardState(), browser_open=lambda _url: False).start()
+
+    assert bound.closed is True
+
+
 def test_dashboard_template_uses_safe_local_rendering() -> None:
     lowered = DASHBOARD_HTML.lower()
 
@@ -126,3 +176,4 @@ def test_dashboard_template_uses_safe_local_rendering() -> None:
     assert "http://" not in lowered
     assert "textcontent" in lowered
     assert "fetch('state'" in lowered
+    assert "selectedmanually" in lowered

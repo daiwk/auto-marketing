@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from collections.abc import Callable
 from datetime import datetime
 from enum import StrEnum
@@ -128,16 +129,36 @@ class _DashboardRun:
             typer.echo(f"Dashboard: {self.server.start()}", err=True)
             self._started = True
 
+    def prepare(self, ticker: str, as_of: str, provider: str) -> None:
+        if self.server is None or not self._started:
+            return
+        try:
+            self.state.prepare(ticker, as_of, provider)
+        except Exception as error:
+            self._clear(error)
+
     def finish(self, status: str, *, reason: str | None = None) -> None:
         if self.server is None or not self._started:
             return
-        version = self.state.set_command_status(status, reason=reason)
-        self.state.wait_until_seen(version, timeout_seconds=1.0)
+        try:
+            version = self.state.set_command_status(status, reason=reason)
+            self.state.wait_until_seen(version, timeout_seconds=1.0)
+        except Exception as error:
+            self._clear(error)
 
     def close(self) -> None:
         if self.server is not None:
-            self.server.stop()
+            try:
+                self.server.stop()
+            except Exception as error:
+                self._clear(error)
             self._started = False
+
+    @staticmethod
+    def _clear(error: BaseException) -> None:
+        if error.__traceback__ is not None:
+            traceback.clear_frames(error.__traceback__)
+        error.__traceback__ = None
 
 
 class _CountingReviewer:
@@ -284,6 +305,10 @@ def backtest(
         dashboard_run.close()
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from None
+    except Exception:
+        dashboard_run.finish("failed")
+        dashboard_run.close()
+        raise
     finally:
         if client is not None:
             client.close()
@@ -313,6 +338,12 @@ def backtest(
         _write_json(output, payload)
         typer.echo(str(output))
         dashboard_run.finish("completed")
+    except KeyboardInterrupt:
+        dashboard_run.finish("stopped")
+        raise typer.Exit(code=130) from None
+    except Exception:
+        dashboard_run.finish("failed")
+        raise
     finally:
         dashboard_run.close()
 
@@ -349,6 +380,11 @@ def agents_analyze(
             _frames(data_root, settings.universe), settings, ticker, point_in_time
         )
         dashboard_run.start()
+        dashboard_run.prepare(
+            prepared.ticker,
+            prepared.as_of.isoformat(),
+            "Codex" if llm_provider is LLMProvider.CODEX else "MiniMax",
+        )
         if not prepared.eligible:
             _write_json(
                 output,
@@ -396,6 +432,9 @@ def agents_analyze(
         dashboard_run.finish("failed")
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from None
+    except Exception:
+        dashboard_run.finish("failed")
+        raise
     finally:
         if client is not None:
             client.close()
