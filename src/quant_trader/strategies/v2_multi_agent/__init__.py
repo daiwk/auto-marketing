@@ -9,6 +9,7 @@ from quant_trader.strategies.v2_multi_agent.context import (
     load_external_context,
     reject_future_context,
 )
+from quant_trader.strategies.v2_multi_agent.events import AgentEvent, AgentEventKind
 from quant_trader.strategies.v2_multi_agent.models import (
     DecisionTrace,
     ExternalContext,
@@ -23,6 +24,8 @@ from quant_trader.strategies.v2_multi_agent.orchestrator import TradingAgentsRev
 
 __all__ = [
     "DecisionTrace",
+    "AgentEvent",
+    "AgentEventKind",
     "ExternalContext",
     "PreparedAnalysis",
     "ReportStatus",

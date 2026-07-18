@@ -12,6 +12,7 @@ from quant_trader.core.models import LLMReview, ReviewAction
 from quant_trader.llm.base import LLMReviewer, MessageInput, canonical_messages
 from quant_trader.llm.parsing import parse_review
 from quant_trader.strategies.v2_multi_agent.context import context_for
+from quant_trader.strategies.v2_multi_agent.events import AgentEvent, AgentEventKind
 from quant_trader.strategies.v2_multi_agent.models import (
     DecisionTrace,
     ExternalContext,
@@ -136,6 +137,7 @@ class TradingAgentsReviewer:
         provider_name: str,
         external_context: ExternalContext | None = None,
         on_progress: Callable[[RoleName, str], None] | None = None,
+        on_event: Callable[[AgentEvent], None] | None = None,
     ) -> None:
         if not callable(getattr(provider, "complete", None)):
             raise TypeError("provider must implement complete(messages)")
@@ -145,6 +147,7 @@ class TradingAgentsReviewer:
         self._provider_name = provider_name.strip()
         self._context = external_context or ExternalContext()
         self._on_progress = on_progress
+        self._on_event = on_event
         self.traces: list[DecisionTrace] = []
 
     def _complete(self, messages: Sequence[MessageInput]) -> str:
@@ -153,6 +156,14 @@ class TradingAgentsReviewer:
     def _notify(self, role: RoleName, status: str) -> None:
         if self._on_progress is not None:
             self._on_progress(role, status)
+
+    def _emit(self, event: AgentEvent) -> None:
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(event)
+        except Exception as error:
+            _clear_error(error)
 
     def _report(self, role: RoleName, payload: Mapping[str, object]) -> RoleReport:
         self._notify(role, "started")
@@ -216,11 +227,37 @@ class TradingAgentsReviewer:
         provider_calls = 0
         current_role = RoleName.MARKET
 
+        def event(
+            kind: AgentEventKind,
+            *,
+            role: RoleName | None = None,
+            report_value: RoleReport | None = None,
+            proposal_value: TraderProposal | None = None,
+            final_value: LLMReview | None = None,
+        ) -> None:
+            self._emit(
+                AgentEvent(
+                    kind=kind,
+                    ticker=ticker,
+                    as_of=as_of,
+                    provider=self._provider_name,
+                    role=role,
+                    report=report_value,
+                    proposal=proposal_value,
+                    final_review=final_value,
+                )
+            )
+
+        event(AgentEventKind.WORKFLOW_STARTED)
+
         def report(role: RoleName, payload: Mapping[str, object]) -> RoleReport:
             nonlocal current_role, provider_calls
             current_role = role
             provider_calls += 1
-            return self._report(role, payload)
+            event(AgentEventKind.ROLE_STARTED, role=role)
+            result = self._report(role, payload)
+            event(AgentEventKind.ROLE_COMPLETED, role=role, report_value=result)
+            return result
 
         try:
             reports.append(report(RoleName.MARKET, {"request": original}))
@@ -232,7 +269,13 @@ class TradingAgentsReviewer:
             )
             for role, value in optional:
                 if not value:
-                    reports.append(_unavailable(role))
+                    unavailable = _unavailable(role)
+                    reports.append(unavailable)
+                    event(
+                        AgentEventKind.ROLE_SKIPPED,
+                        role=role,
+                        report_value=unavailable,
+                    )
                 else:
                     context_payload = (
                         value.model_dump(mode="json")
@@ -257,6 +300,7 @@ class TradingAgentsReviewer:
             proposal = self._trader(
                 {"request": original, "reports": self._dump_reports(reports)}
             )
+            event(AgentEventKind.TRADER_COMPLETED, proposal_value=proposal)
 
             risk_reports: list[RoleReport] = []
             for role in (
@@ -283,13 +327,18 @@ class TradingAgentsReviewer:
                 },
                 proposal,
             )
+            event(AgentEventKind.FINAL_COMPLETED, final_value=final)
             failure_role = None
         except Exception as error:
             self._notify(current_role, "failed")
             _clear_error(error)
-            reports.append(_failed(current_role))
+            failed = _failed(current_role)
+            reports.append(failed)
+            event(AgentEventKind.ROLE_FAILED, role=current_role, report_value=failed)
             final = _synthetic_reject(current_role)
             failure_role = current_role
+
+        event(AgentEventKind.WORKFLOW_COMPLETED, final_value=final)
 
         self.traces.append(
             DecisionTrace(
