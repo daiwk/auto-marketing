@@ -165,6 +165,27 @@ def test_dashboard_requires_trading_agents_backtest(tmp_path: Path) -> None:
     assert "--dashboard requires --use-llm and --llm-workflow trading-agents" in result.output
 
 
+def test_agent_event_stream_requires_trading_agents_backtest(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "--config",
+            "configs/default.yaml",
+            "--data-root",
+            "data",
+            "--output",
+            str(tmp_path / "run.json"),
+            "--agent-events",
+            str(tmp_path / "events.jsonl"),
+        ],
+        env={"COLUMNS": "160"},
+    )
+
+    assert result.exit_code != 0
+    assert "--agent-events requires --use-llm" in result.output
+
+
 def test_dashboard_startup_failure_happens_before_provider(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

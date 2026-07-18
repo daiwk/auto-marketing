@@ -58,6 +58,21 @@ def _manager(tmp_path: Path, commands: list[list[str]]) -> WebJobManager:
                 ),
                 encoding="utf-8",
             )
+            if "--agent-events" in argv:
+                event_output = Path(argv[argv.index("--agent-events") + 1])
+                event_output.write_text(
+                    json.dumps(
+                        {
+                            "kind": "role_started",
+                            "ticker": "SPY",
+                            "as_of": "2025-12-31",
+                            "provider": "Codex",
+                            "role": "market_analyst",
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
         else:
             mode = argv[argv.index("run") + 1]
             output = Path(argv[argv.index("--output-dir") + 1]) / f"{mode}-test"
@@ -116,6 +131,8 @@ def test_trading_agents_command_is_bounded(tmp_path: Path) -> None:
         command = commands[0]
         assert command[command.index("--llm-provider") + 1] == "codex"
         assert command[command.index("--llm-max-reviews") + 1] == "2"
+        assert "--agent-events" in command
+        assert run["agent_events"][0]["role"] == "market_analyst"
     finally:
         manager.close()
 
@@ -143,3 +160,12 @@ def test_token_protected_http_api_submits_run(tmp_path: Path) -> None:
         assert denied.value.code == 404
     finally:
         server.close()
+
+
+def test_web_page_contains_agent_board_and_equity_chart() -> None:
+    from quant_trader.web_template import WEB_HTML
+
+    assert 'id="agentRoles"' in WEB_HTML
+    assert "market_analyst:'市场分析师'" in WEB_HTML
+    assert 'id="equityChart"' in WEB_HTML
+    assert "agent_events" in WEB_HTML

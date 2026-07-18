@@ -24,6 +24,7 @@ from quant_trader.web_template import WEB_HTML
 
 _MAX_BODY_BYTES = 64 * 1024
 _MAX_EVENTS = 1_000
+_MAX_AGENT_EVENTS = 200
 _MAX_LINE_CHARS = 2_000
 _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
@@ -178,6 +179,7 @@ class WebJobManager:
                 "exit_code": None,
                 "artifact_root": None,
                 "events": [],
+                "agent_events": [],
                 "result": None,
                 "error": None,
                 "run_dir": str(run_dir),
@@ -239,6 +241,8 @@ class WebJobManager:
                 "trading-agents",
                 "--llm-max-reviews",
                 str(request.max_reviews),
+                "--agent-events",
+                str(run_dir / "agent-events.jsonl"),
             ]
         experiment = [
             *base,
@@ -270,12 +274,17 @@ class WebJobManager:
             with self._condition:
                 self._processes[run_id] = process
             if request.mode in {
+                WebMode.TRADING_AGENTS,
                 WebMode.FINMEM,
                 WebMode.QUANTA_ALPHA,
                 WebMode.ALPHA_ARENA,
             }:
                 monitor = threading.Thread(
-                    target=self._monitor_artifact_events,
+                    target=(
+                        self._monitor_agent_events
+                        if request.mode is WebMode.TRADING_AGENTS
+                        else self._monitor_artifact_events
+                    ),
                     args=(run_id, monitor_stop),
                     daemon=True,
                 )
@@ -334,7 +343,7 @@ class WebJobManager:
         """Mirror durable experiment stages into the website while a CLI job runs."""
         root = Path(self._jobs[run_id]["run_dir"]) / "artifacts"
         seen: set[tuple[str, int]] = set()
-        while not stop.wait(0.25):
+        while True:
             for path in root.glob("*/events.jsonl"):
                 try:
                     lines = path.read_text(encoding="utf-8").splitlines()
@@ -354,6 +363,40 @@ class WebJobManager:
                     seen.add(key)
                     with self._condition:
                         self._event_locked(run_id, "stage", f"{stage} · {message}")
+            if stop.wait(0.25):
+                return
+
+    def _monitor_agent_events(self, run_id: str, stop: threading.Event) -> None:
+        """Project sanitized TradingAgents JSONL events into the web task snapshot."""
+        seen = 0
+        while True:
+            seen = self._sync_agent_events(run_id, seen)
+            if stop.wait(0.2):
+                self._sync_agent_events(run_id, seen)
+                return
+
+    def _sync_agent_events(self, run_id: str, seen: int) -> int:
+        path = Path(self._jobs[run_id]["run_dir"]) / "agent-events.jsonl"
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return seen
+        lines = content.splitlines()
+        if content and not content.endswith(("\n", "\r")):
+            lines = lines[:-1]
+        for line in lines[seen:]:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or not isinstance(event.get("kind"), str):
+                continue
+            with self._condition:
+                events = self._jobs[run_id]["agent_events"]
+                events.append(event)
+                if len(events) > _MAX_AGENT_EVENTS:
+                    del events[: len(events) - _MAX_AGENT_EVENTS]
+        return len(lines)
 
     def _collect_result(
         self, run_id: str, request: WebRunRequest
@@ -403,6 +446,7 @@ class WebJobManager:
         value.pop("run_dir", None)
         if not include_events:
             value.pop("events", None)
+            value.pop("agent_events", None)
             value.pop("result", None)
         return value
 
