@@ -17,6 +17,7 @@ from quant_trader.data.sina_source import SinaSource
 from quant_trader.data.validation import DataValidationError
 from quant_trader.data.yfinance_source import YFinanceSource
 from quant_trader.llm.base import MessageInput
+from quant_trader.llm.codex import CodexError, CodexReviewer
 from quant_trader.llm.minimax import MiniMaxReviewer
 from quant_trader.paper import run_once
 from quant_trader.report import write_report
@@ -32,6 +33,11 @@ app.add_typer(paper_app, name="paper")
 class MarketSource(StrEnum):
     SINA = "sina"
     YAHOO = "yahoo"
+
+
+class LLMProvider(StrEnum):
+    MINIMAX = "minimax"
+    CODEX = "codex"
 
 
 @data_app.command("sync")
@@ -71,10 +77,13 @@ class _CountingReviewer:
 
 
 class _ProgressReviewer:
-    def __init__(self, reviewer: object, *, max_reviews: int | None) -> None:
+    def __init__(
+        self, reviewer: object, *, max_reviews: int | None, provider_name: str = "MiniMax"
+    ) -> None:
         self.calls = 0
         self.real_calls = 0
         self.truncated_calls = 0
+        self.provider_name = provider_name
         self._reviewer = reviewer
         self._fallback = MaintainReviewer()
         self._max_reviews = max_reviews
@@ -85,14 +94,15 @@ class _ProgressReviewer:
             self.truncated_calls += 1
             if self.truncated_calls == 1:
                 typer.echo(
-                    "LLM review limit reached; remaining reviews use local rules-only replies.",
+                    f"{self.provider_name} review limit reached; remaining reviews use local "
+                    "rules-only replies.",
                     err=True,
                 )
             return self._fallback.complete(messages)
         self.real_calls += 1
-        typer.echo(f"LLM review {self.real_calls} started...", err=True)
+        typer.echo(f"{self.provider_name} review {self.real_calls} started...", err=True)
         result = self._reviewer.complete(messages)  # type: ignore[attr-defined]
-        typer.echo(f"LLM review {self.real_calls} completed.", err=True)
+        typer.echo(f"{self.provider_name} review {self.real_calls} completed.", err=True)
         return result
 
 
@@ -102,14 +112,18 @@ def backtest(
     data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
     output: Annotated[Path, typer.Option()],
     use_llm: Annotated[
-        bool, typer.Option(help="Use MiniMax reviews; requires MINIMAX_API_KEY.")
+        bool, typer.Option(help="Use external LLM reviews (MiniMax by default).")
     ] = False,
+    llm_provider: Annotated[
+        LLMProvider,
+        typer.Option(help="Review provider: minimax requires an API key; codex uses local login."),
+    ] = LLMProvider.MINIMAX,
     llm_max_reviews: Annotated[
         int | None,
         typer.Option(
             min=1,
             help=(
-                "Send only the first N reviews to MiniMax, then use local rules-only replies. "
+                "Send only the first N reviews to the provider, then use local rules-only replies. "
                 "Useful for API smoke tests."
             ),
         ),
@@ -120,24 +134,36 @@ def backtest(
     frames = _frames(data_root, settings.universe)
     reviewer = None
     client = None
-    if use_llm:
-        key = settings.llm.api_key.get_secret_value()
-        if not key:
-            raise typer.BadParameter("--use-llm requires MINIMAX_API_KEY")
-        client = MiniMaxReviewer(
-            key,
-            settings.llm.base_url,
-            settings.llm.model,
-            settings.llm.timeout_seconds,
-            settings.llm.max_retries,
-        )
-        reviewer = _ProgressReviewer(client, max_reviews=llm_max_reviews)
     try:
+        if use_llm:
+            if llm_provider is LLMProvider.CODEX:
+                codex = CodexReviewer()
+                codex.check_available()
+                max_reviews = 3 if llm_max_reviews is None else llm_max_reviews
+                reviewer = _ProgressReviewer(
+                    codex, max_reviews=max_reviews, provider_name="Codex"
+                )
+            else:
+                key = settings.llm.api_key.get_secret_value()
+                if not key:
+                    raise typer.BadParameter("MiniMax reviews require MINIMAX_API_KEY")
+                client = MiniMaxReviewer(
+                    key,
+                    settings.llm.base_url,
+                    settings.llm.model,
+                    settings.llm.timeout_seconds,
+                    settings.llm.max_retries,
+                )
+                reviewer = _ProgressReviewer(
+                    client, max_reviews=llm_max_reviews, provider_name="MiniMax"
+                )
         rules_counter = _CountingReviewer()
         rules_result = run_backtest(frames, settings, reviewer=rules_counter)  # type: ignore[arg-type]
         if use_llm:
+            assert reviewer is not None
             typer.echo(
-                f"LLM enabled: this backtest can request up to {rules_counter.calls} reviews.",
+                f"{reviewer.provider_name} enabled: this backtest can request up to "
+                f"{rules_counter.calls} reviews.",
                 err=True,
             )
         llm_result = (
@@ -145,6 +171,9 @@ def backtest(
             if reviewer is not None
             else None
         )
+    except CodexError as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from None
     finally:
         if client is not None:
             client.close()
@@ -156,8 +185,8 @@ def backtest(
     if isinstance(reviewer, _ProgressReviewer) and reviewer.truncated_calls:
         note = (
             "LLM smoke run truncated: only the first "
-            f"{reviewer.real_calls} reviews used MiniMax; remaining reviews used local rules-only "
-            "replies."
+            f"{reviewer.real_calls} reviews used {reviewer.provider_name}; remaining reviews used "
+            "local rules-only replies."
         )
     if (
         llm_result is not None

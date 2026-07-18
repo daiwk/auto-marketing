@@ -1,8 +1,14 @@
+import json
+from pathlib import Path
+
+import pytest
 from typer.testing import CliRunner
 
+from quant_trader.backtest import MaintainReviewer
 from quant_trader.cli import _CountingReviewer, _ProgressReviewer, app
 from quant_trader.data.validation import DataValidationError
 from quant_trader.llm.base import ChatMessage
+from quant_trader.llm.codex import CodexError
 
 
 def test_cli_help_exits_successfully() -> None:
@@ -109,7 +115,9 @@ def test_counting_reviewer_tracks_rules_only_review_count() -> None:
     assert '"action": "maintain"' in second
 
 
-def test_progress_reviewer_stops_calling_provider_after_limit() -> None:
+def test_progress_reviewer_stops_calling_provider_after_limit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     class Provider:
         def __init__(self) -> None:
             self.calls = 0
@@ -119,7 +127,7 @@ def test_progress_reviewer_stops_calling_provider_after_limit() -> None:
             return _CountingReviewer().complete(messages)
 
     provider = Provider()
-    reviewer = _ProgressReviewer(provider, max_reviews=1)
+    reviewer = _ProgressReviewer(provider, max_reviews=1, provider_name="Codex")
 
     reviewer.complete((ChatMessage(role="user", content="x"),))
     fallback = reviewer.complete((ChatMessage(role="user", content="y"),))
@@ -128,3 +136,140 @@ def test_progress_reviewer_stops_calling_provider_after_limit() -> None:
     assert reviewer.real_calls == 1
     assert reviewer.truncated_calls == 1
     assert '"action": "maintain"' in fallback
+    messages = capsys.readouterr().err
+    assert "Codex review 1 started" in messages
+    assert "Codex review 1 completed" in messages
+
+
+def test_codex_backtest_needs_no_minimax_key_and_defaults_to_three_reviews(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeCodexReviewer:
+        checked = False
+        calls = 0
+
+        def check_available(self) -> None:
+            type(self).checked = True
+
+        def complete(self, messages: tuple[ChatMessage, ...]) -> str:
+            type(self).calls += 1
+            return MaintainReviewer().complete(messages)
+
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.setattr("quant_trader.cli.CodexReviewer", FakeCodexReviewer, raising=False)
+    output = tmp_path / "codex.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "--config",
+            "configs/default.yaml",
+            "--data-root",
+            "data",
+            "--output",
+            str(output),
+            "--use-llm",
+            "--llm-provider",
+            "codex",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert FakeCodexReviewer.checked
+    assert FakeCodexReviewer.calls == 3
+    payload = json.loads(output.read_text())
+    assert payload["note"].startswith("LLM smoke run truncated")
+    assert "first 3 reviews used Codex" in payload["note"]
+
+
+def test_codex_backtest_honors_explicit_review_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeCodexReviewer:
+        calls = 0
+
+        def check_available(self) -> None:
+            return None
+
+        def complete(self, messages: tuple[ChatMessage, ...]) -> str:
+            type(self).calls += 1
+            return MaintainReviewer().complete(messages)
+
+    monkeypatch.setattr("quant_trader.cli.CodexReviewer", FakeCodexReviewer, raising=False)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "--config",
+            "configs/default.yaml",
+            "--data-root",
+            "data",
+            "--output",
+            str(tmp_path / "codex.json"),
+            "--use-llm",
+            "--llm-provider",
+            "codex",
+            "--llm-max-reviews",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert FakeCodexReviewer.calls == 1
+
+
+def test_minimax_provider_still_requires_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "--config",
+            "configs/default.yaml",
+            "--data-root",
+            "data",
+            "--output",
+            str(tmp_path / "minimax.json"),
+            "--use-llm",
+            "--llm-provider",
+            "minimax",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "MINIMAX_API_KEY" in result.output
+
+
+def test_codex_cli_error_is_actionable_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class BrokenCodexReviewer:
+        def check_available(self) -> None:
+            raise CodexError("Codex CLI is unavailable; repair it and run codex login")
+
+    monkeypatch.setattr("quant_trader.cli.CodexReviewer", BrokenCodexReviewer, raising=False)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "--config",
+            "configs/default.yaml",
+            "--data-root",
+            "data",
+            "--output",
+            str(tmp_path / "codex.json"),
+            "--use-llm",
+            "--llm-provider",
+            "codex",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "repair it and run codex login" in result.output
+    assert "Traceback" not in result.output
