@@ -5,7 +5,7 @@ import pytest
 from typer.testing import CliRunner
 
 from quant_trader.backtest import MaintainReviewer
-from quant_trader.cli import _CountingReviewer, _ProgressReviewer, app
+from quant_trader.cli import _CountingReviewer, _ProgressReviewer, _RejectReviewer, app
 from quant_trader.dashboard import DashboardError
 from quant_trader.data.validation import DataValidationError
 from quant_trader.llm.base import ChatMessage
@@ -62,6 +62,16 @@ def test_cli_help_exits_successfully() -> None:
     result = CliRunner().invoke(app, ["--help"])
 
     assert result.exit_code == 0
+
+
+@pytest.mark.parametrize("kind", ["finmem", "quanta-alpha", "alpha-arena"])
+def test_experiment_run_commands_exist(kind: str) -> None:
+    result = CliRunner().invoke(app, ["experiment", "run", kind, "--help"])
+
+    assert result.exit_code == 0
+    assert "--config" in result.output
+    assert "--data-root" in result.output
+    assert "--output-dir" in result.output
 
 
 def test_backtest_help_lists_trading_agents_workflow() -> None:
@@ -490,6 +500,23 @@ def test_progress_reviewer_stops_calling_provider_after_limit(
     messages = capsys.readouterr().err
     assert "Codex review 1 started" in messages
     assert "Codex review 1 completed" in messages
+
+
+def test_progress_reviewer_can_fail_closed_after_limit() -> None:
+    reviewer = _ProgressReviewer(
+        _CountingReviewer(),
+        max_reviews=0,
+        provider_name="MiniMax",
+        fallback=_RejectReviewer(),
+    )
+
+    fallback = json.loads(
+        reviewer.complete((ChatMessage(role="user", content="candidate"),))
+    )
+
+    assert fallback["action"] == "reject"
+    assert fallback["weight_multiplier"] == 0
+    assert reviewer.real_calls == 0
 
 
 def test_codex_backtest_needs_no_minimax_key_and_defaults_to_three_reviews(

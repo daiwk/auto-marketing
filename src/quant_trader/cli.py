@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -20,6 +20,7 @@ from quant_trader.data.cache import ParquetMarketCache
 from quant_trader.data.sina_source import SinaSource
 from quant_trader.data.validation import DataValidationError
 from quant_trader.data.yfinance_source import YFinanceSource
+from quant_trader.experiments.run import run_alpha_arena, run_finmem, run_quanta_alpha
 from quant_trader.llm.base import LLMReviewer, MessageInput
 from quant_trader.llm.codex import CodexError, CodexReviewer
 from quant_trader.llm.minimax import MiniMaxError, MiniMaxReviewer
@@ -38,9 +39,13 @@ app = typer.Typer(help="Safe US-equity research and paper-trading tools (never l
 data_app = typer.Typer(help="Manage the validated local market-data cache.")
 paper_app = typer.Typer(help="Run one confirmed, paper-only cycle.")
 agents_app = typer.Typer(help="Run bounded TradingAgents-style paper analysis.")
+experiment_app = typer.Typer(help="Run reproducible paper strategy experiments.")
+experiment_run_app = typer.Typer(help="Run one paper experiment.")
 app.add_typer(data_app, name="data")
 app.add_typer(paper_app, name="paper")
 app.add_typer(agents_app, name="agents")
+app.add_typer(experiment_app, name="experiment")
+experiment_app.add_typer(experiment_run_app, name="run")
 
 
 class MarketSource(StrEnum):
@@ -85,7 +90,7 @@ def _frames(data_root: Path, tickers: tuple[str, ...]) -> dict[str, pd.DataFrame
 
 
 def _open_provider(
-    settings: Settings, provider: LLMProvider
+    settings: Settings, provider: LLMProvider, *, max_retries: int | None = None
 ) -> tuple[LLMReviewer, MiniMaxReviewer | None, str]:
     if provider is LLMProvider.CODEX:
         codex = CodexReviewer()
@@ -99,7 +104,7 @@ def _open_provider(
         settings.llm.base_url,
         settings.llm.model,
         settings.llm.timeout_seconds,
-        settings.llm.max_retries,
+        settings.llm.max_retries if max_retries is None else max_retries,
     )
     return client, client, "MiniMax"
 
@@ -137,6 +142,24 @@ class _DashboardRun:
         except Exception as error:
             self._clear(error)
 
+    def prepare_experiment(self, kind: str, run_id: str, provider: str) -> None:
+        if self.server is None or not self._started:
+            return
+        try:
+            self.state.prepare_experiment(kind, run_id, provider)
+        except Exception as error:
+            self._clear(error)
+
+    def update_experiment(
+        self, stage: str, status: str, payload: dict[str, object]
+    ) -> None:
+        if self.server is None or not self._started:
+            return
+        try:
+            self.state.update_experiment(stage, status, payload)
+        except Exception as error:
+            self._clear(error)
+
     def finish(self, status: str, *, reason: str | None = None) -> None:
         if self.server is None or not self._started:
             return
@@ -171,16 +194,37 @@ class _CountingReviewer:
         return self._fallback.complete(messages)
 
 
+class _RejectReviewer:
+    def complete(self, messages: Sequence[MessageInput]) -> str:
+        del messages
+        return json.dumps(
+            {
+                "action": "reject",
+                "weight_multiplier": 0,
+                "confidence": 0,
+                "thesis": "External review budget exhausted.",
+                "risks": ["review_budget_exhausted"],
+                "invalidation": "No position without an external review.",
+                "input_anomalies": [],
+            }
+        )
+
+
 class _ProgressReviewer:
     def __init__(
-        self, reviewer: object, *, max_reviews: int | None, provider_name: str = "MiniMax"
+        self,
+        reviewer: object,
+        *,
+        max_reviews: int | None,
+        provider_name: str = "MiniMax",
+        fallback: LLMReviewer | None = None,
     ) -> None:
         self.calls = 0
         self.real_calls = 0
         self.truncated_calls = 0
         self.provider_name = provider_name
         self._reviewer = reviewer
-        self._fallback = MaintainReviewer()
+        self._fallback = fallback or MaintainReviewer()
         self._max_reviews = max_reviews
 
     def complete(self, messages: tuple[MessageInput, ...]) -> str:
@@ -199,6 +243,149 @@ class _ProgressReviewer:
         result = self._reviewer.complete(messages)  # type: ignore[attr-defined]
         typer.echo(f"{self.provider_name} review {self.real_calls} completed.", err=True)
         return result
+
+
+def _run_experiment_command(
+    kind: str,
+    config: Path,
+    data_root: Path,
+    output_dir: Path,
+    llm_provider: LLMProvider | None,
+    dashboard: bool,
+    contestant_runs: tuple[Path, ...] = (),
+) -> None:
+    client: MiniMaxReviewer | None = None
+    dashboard_run = _DashboardRun(dashboard)
+    try:
+        settings = load_settings(config)
+        frames = _frames(data_root, settings.universe)
+        dashboard_run.start()
+        provider_name = "none"
+        provider: LLMReviewer | None = None
+        model = "none"
+        if kind != "alpha-arena":
+            assert llm_provider is not None
+            provider, client, provider_name = _open_provider(
+                settings, llm_provider, max_retries=0
+            )
+            model = settings.llm.model if llm_provider is LLMProvider.MINIMAX else "codex"
+        prepared = False
+
+        def update(stage: str, status: str, payload: dict[str, object]) -> None:
+            nonlocal prepared
+            if not prepared:
+                run_id = payload.get("run_id")
+                if isinstance(run_id, str):
+                    dashboard_run.prepare_experiment(kind, run_id, provider_name)
+                    prepared = True
+            dashboard_run.update_experiment(stage, status, payload)
+
+        if kind == "finmem":
+            assert provider is not None
+            root = run_finmem(
+                settings,
+                frames,
+                output_dir,
+                provider,
+                provider_name,
+                model,
+                lambda value: _ProgressReviewer(
+                    value,
+                    max_reviews=1,
+                    provider_name=provider_name,
+                    fallback=_RejectReviewer(),
+                ),
+                update if dashboard else None,
+            )
+        elif kind == "quanta-alpha":
+            assert provider is not None
+            root = run_quanta_alpha(
+                settings,
+                frames,
+                output_dir,
+                provider,
+                provider_name,
+                model,
+                update if dashboard else None,
+            )
+        else:
+            root = run_alpha_arena(
+                settings,
+                frames,
+                output_dir,
+                contestant_runs,
+                update if dashboard else None,
+            )
+        typer.echo(str(root))
+        dashboard_run.finish("completed")
+    except KeyboardInterrupt:
+        dashboard_run.finish("stopped")
+        raise typer.Exit(code=130) from None
+    except (
+        CodexError,
+        DashboardError,
+        DataValidationError,
+        MiniMaxError,
+        OSError,
+        ValueError,
+    ) as error:
+        dashboard_run.finish("failed")
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from None
+    finally:
+        if client is not None:
+            client.close()
+        dashboard_run.close()
+
+
+@experiment_run_app.command("finmem")
+def experiment_finmem(
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output_dir: Annotated[Path, typer.Option()],
+    llm_provider: Annotated[LLMProvider, typer.Option()] = LLMProvider.MINIMAX,
+    dashboard: Annotated[bool, typer.Option()] = False,
+) -> None:
+    """Run one-call, memory-aware paper backtest."""
+    _run_experiment_command(
+        "finmem", config, data_root, output_dir, llm_provider, dashboard
+    )
+
+
+@experiment_run_app.command("quanta-alpha")
+def experiment_quanta_alpha(
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output_dir: Annotated[Path, typer.Option()],
+    llm_provider: Annotated[LLMProvider, typer.Option()] = LLMProvider.MINIMAX,
+    dashboard: Annotated[bool, typer.Option()] = False,
+) -> None:
+    """Mine a safe factor DSL with at most two provider calls."""
+    _run_experiment_command(
+        "quanta-alpha", config, data_root, output_dir, llm_provider, dashboard
+    )
+
+
+@experiment_run_app.command("alpha-arena")
+def experiment_alpha_arena(
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output_dir: Annotated[Path, typer.Option()],
+    contestant_run: Annotated[
+        list[Path], typer.Option(exists=True, file_okay=False, help="Existing run directory.")
+    ] = [],
+    dashboard: Annotated[bool, typer.Option()] = False,
+) -> None:
+    """Compare existing artifacts without constructing an LLM provider."""
+    _run_experiment_command(
+        "alpha-arena",
+        config,
+        data_root,
+        output_dir,
+        None,
+        dashboard,
+        tuple(contestant_run),
+    )
 
 
 @app.command()

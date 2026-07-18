@@ -395,3 +395,75 @@ quant-trader backtest \
 
 这是预期行为。Dashboard 是随命令启动的临时服务，命令结束后自动关闭。持久化结果请查看
 `agent-run.json` 或回测的 `run-dashboard.json`。
+
+## 论文策略实验（MVP）
+
+这一版加入三个彼此独立的论文启发式实验，全部使用本地缓存行情和纸面回测，不会真实下单。
+输出会写入 `--output-dir` 下带时间戳的独立目录。
+
+### FinMem：三层记忆辅助决策
+
+MiniMax 中国区 M3：
+
+```bash
+export MINIMAX_API_KEY="你的 API Key"
+quant-trader experiment run finmem \
+  --config configs/default.yaml \
+  --data-root data \
+  --output-dir runs \
+  --llm-provider minimax \
+  --dashboard
+```
+
+使用本地 Codex 登录：
+
+```bash
+quant-trader experiment run finmem \
+  --config configs/default.yaml \
+  --data-root data \
+  --output-dir runs \
+  --llm-provider codex \
+  --dashboard
+```
+
+为避免历史回测产生大量请求，FinMem 默认只让第一个审核点调用一次 LLM，其余审核点使用
+本地规则回复。Dashboard 展示短期、中期、长期三条记忆泳道、最近动作和引用的记忆 ID。
+第一版从空记忆开始，并把可复用的记忆和最后一次决策写入 `finmem/`。
+
+### QuantaAlpha：安全因子 DSL 与一代进化
+
+```bash
+quant-trader experiment run quanta-alpha \
+  --config configs/default.yaml \
+  --data-root data \
+  --output-dir runs \
+  --llm-provider minimax \
+  --dashboard
+```
+
+它最多调用两次 LLM：一次批量生成种子因子，一次生成变异或交叉后代。表达式只能使用白名单
+字段和函数，由手写解析器执行；不会运行模型生成的 Python。Dashboard 展示候选表达式、父子
+关系、拒绝原因和冻结冠军，结果写入 `quanta_alpha/result.json`。
+
+### Alpha Arena：零调用策略排行榜
+
+Arena 只读取已经生成的实验目录，自身不会打开 MiniMax 或 Codex：
+
+```bash
+quant-trader experiment run alpha-arena \
+  --config configs/default.yaml \
+  --data-root data \
+  --output-dir runs \
+  --contestant-run runs/finmem-具体运行目录 \
+  --contestant-run runs/quanta-alpha-具体运行目录 \
+  --dashboard
+```
+
+缺少的参赛者会显示为 `absent`，损坏或配置不一致的产物只会让对应参赛者失败。Dashboard
+按风险违规、最大回撤绝对值、收益的顺序展示排行榜，同时显示成本和净值记录。
+
+### 如何判断模型慢还是程序卡住
+
+终端会输出 `review started/completed`，Dashboard 顶部显示当前阶段与调用数。MiniMax 和 Codex
+仍使用配置或客户端的硬超时；失败后命令会输出脱敏错误并保留已经写入的 manifest、事件和阶段
+产物。任何回测收益都只是历史纸面结果，不代表未来表现或实盘收益。
