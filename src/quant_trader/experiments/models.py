@@ -34,7 +34,7 @@ class ExperimentStatus(StrEnum):
 class StrictFrozenModel(BaseModel):
     """Base contract that prevents unreviewed artifact fields."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 class ExperimentEvent(StrictFrozenModel):
