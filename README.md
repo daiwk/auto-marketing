@@ -112,3 +112,21 @@ The backtest defaults to one complete multi-agent workflow and then uses local r
 Set `--llm-max-reviews N` explicitly to allow more complete workflows. Optional news, sentiment, and
 fundamentals input is accepted via `--context context.json`; every item is filtered by its observation
 date, and `agents analyze` rejects any item later than `--as-of`.
+
+Add `--dashboard` to watch the sanitized decision process update in a local browser while the
+command is running:
+
+```bash
+quant-trader agents analyze --ticker SPY --as-of 2025-12-31 \
+  --config configs/default.yaml --data-root data --output agent-run.json \
+  --llm-provider minimax --dashboard
+
+quant-trader backtest --config configs/default.yaml --data-root data --output run.json \
+  --use-llm --llm-workflow trading-agents --dashboard
+```
+
+The temporary dashboard listens only on `127.0.0.1`, uses a random per-run URL, and displays
+validated role summaries, risks, proposals, and final decisions. It never displays raw model output,
+prompts, credentials, or order controls, and closing it cannot alter the paper-trading result. The
+loaded page retains its last rendered state when the command exits; refreshing it afterward is not
+supported. `--dashboard` is intentionally unavailable for rules-only and single-review workflows.

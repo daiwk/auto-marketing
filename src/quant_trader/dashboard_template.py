@@ -69,7 +69,7 @@ function decision(rootId,value){const root=document.getElementById(rootId);root.
 root.append(el('h3',(value.action||'')+' · 权重倍数 '+Number(value.weight_multiplier).toFixed(2)));
 root.append(el('p',value.thesis));fillList(root,'风险',value.risks)}
 function render(data){const workflow=data.workflow;document.getElementById('status').textContent=data.command_status+' · 已完成 '+data.workflow_count+' 个工作流';
-if(!workflow)return;window.currentWorkflow=workflow;document.getElementById('title').textContent=workflow.ticker+' · '+workflow.as_of;
+if(!workflow){if(data.reason)document.getElementById('activity').textContent=data.reason;return}window.currentWorkflow=workflow;document.getElementById('title').textContent=workflow.ticker+' · '+workflow.as_of;
 document.getElementById('meta').textContent=workflow.provider+' · '+workflow.status;const root=document.getElementById('roles');root.replaceChildren();
 let done=0;order.forEach(role=>{const item=workflow.roles[role];const button=el('button',undefined,'role '+item.status);button.dataset.role=role;
 button.append(el('div',roleLabels[role],'role-name'));let note=item.status;if(item.report)note=item.report.stance+' · '+Math.round(item.report.confidence*100)+'%';
