@@ -10,6 +10,8 @@ from typer.testing import CliRunner
 
 from quant_trader.backtest import BacktestResult
 from quant_trader.cli import app
+from quant_trader.config import Settings
+from quant_trader.experiments.run import data_fingerprint
 
 
 def _frames() -> dict[str, pd.DataFrame]:
@@ -65,12 +67,22 @@ class _Provider:
         )
 
 
+def test_data_fingerprint_changes_when_market_values_change() -> None:
+    frames = _frames()
+    settings = Settings(universe=("SPY", "QQQ"))
+    original = data_fingerprint(frames, settings)
+    changed = {ticker: frame.copy() for ticker, frame in frames.items()}
+    changed["SPY"].iloc[0, changed["SPY"].columns.get_loc("close")] += 1
+    assert data_fingerprint(changed, settings) != original
+
+
 def test_finmem_command_writes_bounded_artifacts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("quant_trader.cli._frames", lambda *args: _frames())
     monkeypatch.setattr(
-        "quant_trader.cli._open_provider", lambda *args: (_Provider(), None, "Codex")
+        "quant_trader.cli._open_provider",
+        lambda *args, **kwargs: (_Provider(), None, "Codex"),
     )
     monkeypatch.setattr("quant_trader.experiments.run.run_backtest", lambda *args, **kw: _result())
     output = tmp_path / "runs"
@@ -122,7 +134,8 @@ def test_quanta_alpha_command_writes_result_from_date_ticker_panel(
 
     monkeypatch.setattr("quant_trader.cli._frames", lambda *args: _frames())
     monkeypatch.setattr(
-        "quant_trader.cli._open_provider", lambda *args: (_Provider(), None, "Codex")
+        "quant_trader.cli._open_provider",
+        lambda *args, **kwargs: (_Provider(), None, "Codex"),
     )
     monkeypatch.setattr("quant_trader.experiments.run.QuantaAlphaMiner", FakeMiner)
     output = tmp_path / "runs"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -90,7 +90,7 @@ def _frames(data_root: Path, tickers: tuple[str, ...]) -> dict[str, pd.DataFrame
 
 
 def _open_provider(
-    settings: Settings, provider: LLMProvider
+    settings: Settings, provider: LLMProvider, *, max_retries: int | None = None
 ) -> tuple[LLMReviewer, MiniMaxReviewer | None, str]:
     if provider is LLMProvider.CODEX:
         codex = CodexReviewer()
@@ -104,7 +104,7 @@ def _open_provider(
         settings.llm.base_url,
         settings.llm.model,
         settings.llm.timeout_seconds,
-        settings.llm.max_retries,
+        settings.llm.max_retries if max_retries is None else max_retries,
     )
     return client, client, "MiniMax"
 
@@ -194,16 +194,37 @@ class _CountingReviewer:
         return self._fallback.complete(messages)
 
 
+class _RejectReviewer:
+    def complete(self, messages: Sequence[MessageInput]) -> str:
+        del messages
+        return json.dumps(
+            {
+                "action": "reject",
+                "weight_multiplier": 0,
+                "confidence": 0,
+                "thesis": "External review budget exhausted.",
+                "risks": ["review_budget_exhausted"],
+                "invalidation": "No position without an external review.",
+                "input_anomalies": [],
+            }
+        )
+
+
 class _ProgressReviewer:
     def __init__(
-        self, reviewer: object, *, max_reviews: int | None, provider_name: str = "MiniMax"
+        self,
+        reviewer: object,
+        *,
+        max_reviews: int | None,
+        provider_name: str = "MiniMax",
+        fallback: LLMReviewer | None = None,
     ) -> None:
         self.calls = 0
         self.real_calls = 0
         self.truncated_calls = 0
         self.provider_name = provider_name
         self._reviewer = reviewer
-        self._fallback = MaintainReviewer()
+        self._fallback = fallback or MaintainReviewer()
         self._max_reviews = max_reviews
 
     def complete(self, messages: tuple[MessageInput, ...]) -> str:
@@ -244,7 +265,9 @@ def _run_experiment_command(
         model = "none"
         if kind != "alpha-arena":
             assert llm_provider is not None
-            provider, client, provider_name = _open_provider(settings, llm_provider)
+            provider, client, provider_name = _open_provider(
+                settings, llm_provider, max_retries=0
+            )
             model = settings.llm.model if llm_provider is LLMProvider.MINIMAX else "codex"
         prepared = False
 
@@ -267,7 +290,10 @@ def _run_experiment_command(
                 provider_name,
                 model,
                 lambda value: _ProgressReviewer(
-                    value, max_reviews=1, provider_name=provider_name
+                    value,
+                    max_reviews=1,
+                    provider_name=provider_name,
+                    fallback=_RejectReviewer(),
                 ),
                 update if dashboard else None,
             )

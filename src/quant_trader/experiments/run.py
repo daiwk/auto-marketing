@@ -54,15 +54,27 @@ def _shared_dates(frames: Mapping[str, pd.DataFrame]) -> pd.DatetimeIndex:
 
 def data_fingerprint(frames: Mapping[str, pd.DataFrame], settings: Settings) -> str:
     dates = _shared_dates(frames)
-    payload = {
+    metadata = {
         "universe": list(settings.universe),
         "start": dates[0].date().isoformat(),
         "end": dates[-1].date().isoformat(),
-        "rows": {ticker: len(frames[ticker]) for ticker in settings.universe},
         "costs": [settings.execution.commission_bps, settings.execution.slippage_bps],
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
+    digest = hashlib.sha256(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+    )
+    columns = ["open", "high", "low", "close", "volume"]
+    for ticker in settings.universe:
+        frame = frames[ticker].loc[:, columns]
+        digest.update(ticker.encode())
+        digest.update(
+            json.dumps(
+                {"columns": columns, "dtypes": [str(frame[column].dtype) for column in columns]},
+                separators=(",", ":"),
+            ).encode()
+        )
+        digest.update(pd.util.hash_pandas_object(frame, index=True).values.tobytes())
+    return digest.hexdigest()
 
 
 def _create_store(
