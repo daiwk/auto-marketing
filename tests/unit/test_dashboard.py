@@ -177,3 +177,45 @@ def test_dashboard_template_uses_safe_local_rendering() -> None:
     assert "textcontent" in lowered
     assert "fetch('state'" in lowered
     assert "selectedmanually" in lowered
+
+
+def test_dashboard_state_projects_experiment_snapshots() -> None:
+    state = DashboardState()
+
+    state.prepare_experiment("finmem", "run-123", "Codex")
+    state.update_experiment(
+        "backtest",
+        "running",
+        {
+            "calls": 1,
+            "memory": {"short": [], "mid": [], "long": []},
+            "decision": {"action": "maintain", "memory_ids": []},
+        },
+    )
+
+    snapshot = state.snapshot()
+    assert snapshot["mode"] == "experiment"
+    assert snapshot["command_status"] == "running"
+    assert snapshot["experiment"] == {
+        "kind": "finmem",
+        "run_id": "run-123",
+        "provider": "Codex",
+        "stage": "backtest",
+        "status": "running",
+        "payload": {
+            "calls": 1,
+            "memory": {"short": [], "mid": [], "long": []},
+            "decision": {"action": "maintain", "memory_ids": []},
+        },
+    }
+
+
+def test_dashboard_template_contains_all_experiment_views() -> None:
+    lowered = DASHBOARD_HTML.lower()
+
+    assert "finmem" in lowered
+    assert "quanta-alpha" in lowered
+    assert "alpha-arena" in lowered
+    assert "candidate" in lowered
+    assert "leaderboard" in lowered
+    assert "innerhtml" not in lowered

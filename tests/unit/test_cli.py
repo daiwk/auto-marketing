@@ -64,6 +64,16 @@ def test_cli_help_exits_successfully() -> None:
     assert result.exit_code == 0
 
 
+@pytest.mark.parametrize("kind", ["finmem", "quanta-alpha", "alpha-arena"])
+def test_experiment_run_commands_exist(kind: str) -> None:
+    result = CliRunner().invoke(app, ["experiment", "run", kind, "--help"])
+
+    assert result.exit_code == 0
+    assert "--config" in result.output
+    assert "--data-root" in result.output
+    assert "--output-dir" in result.output
+
+
 def test_backtest_help_lists_trading_agents_workflow() -> None:
     result = CliRunner().invoke(app, ["backtest", "--help"], env={"COLUMNS": "160"})
 

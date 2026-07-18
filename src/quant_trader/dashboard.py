@@ -44,9 +44,11 @@ class DashboardState:
         self._seen_version = 0
         self._snapshot: dict[str, object] = {
             "version": 0,
+            "mode": "trading-agents",
             "command_status": "preparing",
             "workflow_count": 0,
             "workflow": None,
+            "experiment": None,
         }
 
     def _advance(self) -> int:
@@ -68,6 +70,8 @@ class DashboardState:
         ):
             raise ValueError("dashboard preparation labels must be bounded strings")
         with self._condition:
+            self._snapshot["mode"] = "trading-agents"
+            self._snapshot["experiment"] = None
             self._snapshot["workflow"] = {
                 "ticker": ticker,
                 "as_of": as_of,
@@ -81,8 +85,53 @@ class DashboardState:
             }
             return self._advance()
 
+    def prepare_experiment(self, kind: str, run_id: str, provider: str) -> int:
+        if kind not in {"finmem", "quanta-alpha", "alpha-arena"}:
+            raise ValueError("invalid experiment kind")
+        values = (run_id, provider)
+        if any(
+            not isinstance(value, str) or not value.strip() or len(value) > 100
+            for value in values
+        ):
+            raise ValueError("experiment dashboard labels must be bounded strings")
+        with self._condition:
+            self._snapshot["mode"] = "experiment"
+            self._snapshot["workflow"] = None
+            self._snapshot["experiment"] = {
+                "kind": kind,
+                "run_id": run_id,
+                "provider": provider,
+                "stage": "prepare",
+                "status": "preparing",
+                "payload": {},
+            }
+            return self._advance()
+
+    def update_experiment(self, stage: str, status: str, payload: dict[str, object]) -> int:
+        if status not in {"preparing", "running", "partial", "completed", "failed"}:
+            raise ValueError("invalid experiment status")
+        if not isinstance(stage, str) or not stage.strip() or len(stage) > 80:
+            raise ValueError("experiment stage must be a bounded string")
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError):
+            raise ValueError("experiment payload must be finite JSON") from None
+        if len(encoded.encode("utf-8")) > 256_000:
+            raise ValueError("experiment payload is too large")
+        with self._condition:
+            experiment = self._snapshot.get("experiment")
+            if not isinstance(experiment, dict):
+                raise ValueError("experiment dashboard was not prepared")
+            experiment.update(stage=stage, status=status, payload=copy.deepcopy(payload))
+            self._snapshot["command_status"] = (
+                "running" if status in {"preparing", "running"} else status
+            )
+            return self._advance()
+
     def _project(self, event: AgentEvent) -> None:
         if event.kind is AgentEventKind.WORKFLOW_STARTED:
+            self._snapshot["mode"] = "trading-agents"
+            self._snapshot["experiment"] = None
             self._snapshot["command_status"] = "running"
             self._snapshot["workflow"] = {
                 "ticker": event.ticker,

@@ -112,3 +112,52 @@ def test_missing_defaults_are_absent_and_payload_is_json_ready(tmp_path: Path) -
     assert set(payload) == {"leaderboard", "equity", "action_distribution", "costs", "risk_markers"}
     assert payload["action_distribution"] == {"buy": 1, "sell": 0, "hold": 0}
     assert json.loads(json.dumps(payload)) == payload
+
+
+def test_loads_shared_experiment_manifest_and_finmem_result(tmp_path: Path) -> None:
+    run = tmp_path / "finmem-001"
+    (run / "finmem").mkdir(parents=True)
+    (run / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "finmem-001",
+                "experiment": "finmem",
+                "code_version": "test",
+                "data_fingerprint": "fp-1",
+                "data_start": "2024-01-02",
+                "data_end": "2024-01-05",
+                "universe": ["AAPL", "MSFT"],
+                "provider": "Codex",
+                "model": "codex",
+                "attempt_limit": 1,
+                "initial_cash": 100_000.0,
+                "commission_bps": 2.0,
+                "slippage_bps": 3.0,
+                "max_position_weight": 0.15,
+                "max_gross_exposure": 0.8,
+                "max_drawdown": 0.15,
+            }
+        )
+    )
+    (run / "finmem" / "result.json").write_text(
+        json.dumps(
+            {
+                "metrics": {
+                    "total_return": 0.1,
+                    "max_drawdown": -0.05,
+                    "sharpe": 1.2,
+                    "costs": 7.0,
+                },
+                "equity": {"2024-01-02": 100_000.0, "2024-01-05": 110_000.0},
+                "gross_exposure": {},
+                "fills": [],
+            }
+        )
+    )
+
+    payload = AlphaArena(CONFIG).run({"finmem-001": run})
+
+    row = next(item for item in payload["leaderboard"] if item["name"] == "finmem-001")
+    assert row["status"] == "completed"
+    assert row["total_return"] == 0.1
+    assert row["costs"] == 7.0

@@ -46,6 +46,8 @@ height:100%;background:var(--blue);transition:width .3s}.footer{color:var(--mute
 <section class="panel"><div class="label">实时状态</div><div id="activity" class="empty">准备数据与模型...</div></section></div>
 <div class="decision"><section class="panel"><div class="label">交易员建议</div><div id="proposal" class="empty">等待交易员</div></section>
 <section class="panel"><div class="label">最终组合决策</div><div id="final" class="empty">等待风险评审</div></section></div>
+<section class="panel" id="experiment-panel" hidden><div class="label">Paper Experiment 驾驶舱</div>
+<div id="experiment-summary" class="empty">等待实验开始...</div><div id="experiment-detail"></div></section>
 <div class="footer">页面只显示经过验证的结构化结论，不包含原始模型输出、Prompt 或凭证。</div>
 </main><script>
 const roleLabels={market_analyst:'市场分析',sentiment_analyst:'情绪分析',news_analyst:'新闻分析',
@@ -68,7 +70,23 @@ fillList(root,'输入异常',item.report.input_anomalies)}
 function decision(rootId,value){const root=document.getElementById(rootId);root.replaceChildren();if(!value){root.append(el('p','等待中','empty'));return}
 root.append(el('h3',(value.action||'')+' · 权重倍数 '+Number(value.weight_multiplier).toFixed(2)));
 root.append(el('p',value.thesis));fillList(root,'风险',value.risks)}
-function render(data){const workflow=data.workflow;document.getElementById('status').textContent=data.command_status+' · 已完成 '+data.workflow_count+' 个工作流';
+function metric(root,label,value){const row=el('p');row.append(el('b',label+'：'));row.append(document.createTextNode(String(value??'-')));root.append(row)}
+function renderFinMem(root,payload){const memory=payload.memory||{};root.append(el('h2','FinMem 三层记忆'));
+['short','mid','long'].forEach(lane=>{const box=el('section',undefined,'panel');box.append(el('b',lane+' memory'));fillList(box,'记录',memory[lane]||[]);root.append(box)});
+const decision=payload.decision||{};metric(root,'最新动作',decision.action);fillList(root,'引用证据',decision.memory_ids||[])}
+function renderQuanta(root,payload){root.append(el('h2','QuantaAlpha 候选因子'));(payload.candidates||[]).forEach(item=>{const card=el('section',undefined,'panel');
+metric(card,'Candidate',item.expression);metric(card,'Parent',item.parent);metric(card,'Gate rejection',item.rejection_reason);root.append(card)});
+fillList(root,'Parent edges',(payload.edges||[]).map(edge=>(edge.parent||'')+' → '+(edge.child||'')));metric(root,'Champion',payload.champion&&payload.champion.expression)}
+function renderArena(root,payload){root.append(el('h2','Alpha Arena Leaderboard'));(payload.leaderboard||[]).forEach(item=>{const row=el('section',undefined,'panel');
+metric(row,'排名',item.rank);metric(row,'参赛者',item.name);metric(row,'状态',item.status);metric(row,'收益',item.total_return);metric(row,'回撤',item.max_drawdown);metric(row,'成本',item.costs);root.append(row)});
+Object.entries(payload.equity||{}).forEach(([name,points])=>fillList(root,name+' equity',Object.entries(points).map(([day,value])=>day+' · '+value)))}
+function renderExperiment(data){const experiment=data.experiment;if(!experiment)return;document.getElementById('experiment-panel').hidden=false;
+document.querySelectorAll('.grid,.decision').forEach(node=>node.hidden=true);document.getElementById('title').textContent=experiment.kind+' · '+experiment.run_id;
+document.getElementById('meta').textContent=experiment.provider+' · stage '+experiment.stage;document.getElementById('status').textContent=experiment.status;
+const summary=document.getElementById('experiment-summary');summary.textContent='调用 '+String((experiment.payload||{}).calls||0)+' · '+experiment.stage;
+const root=document.getElementById('experiment-detail');root.replaceChildren();const payload=experiment.payload||{};
+if(experiment.kind==='finmem')renderFinMem(root,payload);else if(experiment.kind==='quanta-alpha')renderQuanta(root,payload);else if(experiment.kind==='alpha-arena')renderArena(root,payload)}
+function render(data){if(data.mode==='experiment'){renderExperiment(data);return}const workflow=data.workflow;document.getElementById('status').textContent=data.command_status+' · 已完成 '+data.workflow_count+' 个工作流';
 if(!workflow){if(data.reason)document.getElementById('activity').textContent=data.reason;return}const nextKey=workflow.ticker+'|'+workflow.as_of+'|'+data.workflow_count;if(nextKey!==workflowKey){workflowKey=nextKey;selected=null;selectedManually=false}window.currentWorkflow=workflow;document.getElementById('title').textContent=workflow.ticker+' · '+workflow.as_of;
 document.getElementById('meta').textContent=workflow.provider+' · '+workflow.status;const root=document.getElementById('roles');root.replaceChildren();
 let done=0;order.forEach(role=>{const item=workflow.roles[role];const button=el('button',undefined,'role '+item.status);button.dataset.role=role;

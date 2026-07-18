@@ -82,6 +82,8 @@ class ArtifactLoader:
         try:
             manifest = self._read_json(run_path / "manifest.json")
             self._validate_manifest(manifest)
+            if isinstance(manifest, dict) and "experiment" in manifest:
+                return self._load_experiment(name, run_path, manifest)
             result_name = manifest.get("result_file", "summary.json")
             if not isinstance(result_name, str) or not self._safe_json_name(result_name):
                 return self._failed(name, "invalid_artifact")
@@ -107,9 +109,60 @@ class ArtifactLoader:
         if not isinstance(manifest, dict):
             raise ValueError("invalid_artifact")
         expected = self._expected_config.model_dump(mode="json")
+        if "experiment" in manifest:
+            observed = {
+                "fingerprint": manifest.get("data_fingerprint"),
+                "universe": manifest.get("universe"),
+                "start_date": manifest.get("data_start"),
+                "end_date": manifest.get("data_end"),
+                "initial_cash": manifest.get("initial_cash"),
+                "cost_bps": (
+                    manifest.get("commission_bps", 0) + manifest.get("slippage_bps", 0)
+                    if isinstance(manifest.get("commission_bps"), int | float)
+                    and isinstance(manifest.get("slippage_bps"), int | float)
+                    else None
+                ),
+            }
+            if observed != expected:
+                raise ValueError("config_mismatch")
+            return
         for key, value in expected.items():
             if manifest.get(key) != value:
                 raise ValueError("config_mismatch")
+
+    def _load_experiment(
+        self, name: str, run_path: Path, manifest: dict[str, Any]
+    ) -> ContestantResult:
+        experiment = manifest.get("experiment")
+        result_paths = {
+            "finmem": Path("finmem/result.json"),
+            "quanta-alpha": Path("quanta_alpha/result.json"),
+        }
+        if not isinstance(experiment, str):
+            return self._failed(name, "invalid_artifact")
+        result_path = result_paths.get(experiment)
+        if result_path is None:
+            return self._failed(name, "invalid_artifact")
+        result = self._read_json(run_path / result_path)
+        if not isinstance(result, dict) or not self._all_finite(result):
+            return self._failed(name, "invalid_metrics")
+        if experiment == "finmem":
+            metrics = result.get("metrics")
+            equity = result.get("equity")
+            if not isinstance(metrics, dict) or not isinstance(equity, dict):
+                return self._failed(name, "invalid_artifact")
+            return ContestantResult.model_validate(
+                {
+                    "name": name,
+                    "status": "completed",
+                    "equity": equity,
+                    "total_return": metrics.get("total_return", 0),
+                    "max_drawdown": metrics.get("max_drawdown", 0),
+                    "sharpe": metrics.get("sharpe", 0),
+                    "costs": metrics.get("costs", 0),
+                }
+            )
+        return ContestantResult(name=name, status=ContestantStatus.PARTIAL)
 
     @staticmethod
     def _read_json(path: Path) -> Any:
