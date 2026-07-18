@@ -35,7 +35,7 @@ and how many complete workflows have finished; the page retains the latest workf
 
 ## Architecture
 
-Create a dependency-light `quant_trader.dashboard` package with three boundaries:
+Create a dependency-light `quant_trader.dashboard` module with three boundaries:
 
 - `DashboardState` is a thread-safe in-memory projection of sanitized workflow events. It owns a
   monotonically increasing version and produces JSON-ready immutable snapshots.
