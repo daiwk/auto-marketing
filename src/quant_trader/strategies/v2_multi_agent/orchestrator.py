@@ -44,10 +44,10 @@ def _synthetic_reject(role: RoleName) -> LLMReview:
         action=ReviewAction.REJECT,
         weight_multiplier=0,
         confidence=0,
-        thesis="The multi-agent workflow did not produce a valid decision.",
-        risks=("multi_agent_failure",),
-        invalidation="No position without a complete valid workflow.",
-        input_anomalies=(f"failed_role:{role.value}",),
+        thesis="多 Agent 工作流未能生成有效决策。",
+        risks=("多 Agent 工作流失败",),
+        invalidation="工作流未完整通过时不建立仓位。",
+        input_anomalies=("多 Agent 工作流包含失败角色",),
     )
 
 
@@ -57,8 +57,8 @@ def _unavailable(role: RoleName) -> RoleReport:
         status=ReportStatus.UNAVAILABLE,
         stance=Stance.NEUTRAL,
         confidence=0,
-        summary="No point-in-time external context was supplied for this role.",
-        input_anomalies=("context_unavailable",),
+        summary="该角色没有可用的时点外部上下文，因此跳过分析。",
+        input_anomalies=("上下文不可用",),
     )
 
 
@@ -68,8 +68,8 @@ def _failed(role: RoleName) -> RoleReport:
         status=ReportStatus.FAILED,
         stance=Stance.NEUTRAL,
         confidence=0,
-        summary="This role did not produce a valid bounded response.",
-        input_anomalies=("role_failure",),
+        summary="该角色未能生成有效且满足边界要求的回复。",
+        input_anomalies=("角色执行失败",),
     )
 
 
