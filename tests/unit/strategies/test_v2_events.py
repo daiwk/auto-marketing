@@ -96,6 +96,12 @@ def test_market_only_workflow_emits_sanitized_ordered_events() -> None:
     assert [event.kind for event in events if event.role is RoleName.SENTIMENT] == [
         AgentEventKind.ROLE_SKIPPED
     ]
+    assert [event.kind for event in events if event.role is RoleName.TRADER] == [
+        AgentEventKind.ROLE_STARTED
+    ]
+    assert [event.kind for event in events if event.role is RoleName.PORTFOLIO_MANAGER] == [
+        AgentEventKind.ROLE_STARTED
+    ]
     assert events[-1].kind is AgentEventKind.WORKFLOW_COMPLETED
     assert events[-1].final_review is not None
     serialized = "".join(event.model_dump_json() for event in events).lower()

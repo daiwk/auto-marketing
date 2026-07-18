@@ -297,6 +297,7 @@ class TradingAgentsReviewer:
 
             current_role = RoleName.TRADER
             provider_calls += 1
+            event(AgentEventKind.ROLE_STARTED, role=RoleName.TRADER)
             proposal = self._trader(
                 {"request": original, "reports": self._dump_reports(reports)}
             )
@@ -320,6 +321,7 @@ class TradingAgentsReviewer:
 
             current_role = RoleName.PORTFOLIO_MANAGER
             provider_calls += 1
+            event(AgentEventKind.ROLE_STARTED, role=RoleName.PORTFOLIO_MANAGER)
             final = self._portfolio(
                 {
                     "proposal": self._dump_proposal(proposal),
