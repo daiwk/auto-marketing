@@ -1,132 +1,397 @@
 # quant-trader
 
-A deliberately small, long-only US-equity research and **paper-trading** tool. It ships with a
-validated 2023–2025 daily-bar snapshot, runs weekly rules decisions at the close, fills target
-weights at the next available open with costs, and persists one confirmed paper cycle to SQLite.
+一个刻意保持小而安全的美股量化研究与**纸面交易**工具。项目内置经过校验的
+2023—2025 年日线数据，支持规则策略、MiniMax/Codex 辅助决策、TradingAgents 多 Agent
+分析、历史回测和单次纸面交易。
 
-> **Disclaimer:** Research and paper simulation only. This is not investment advice. The package
-> has no live broker integration and cannot place live orders. Simulated results do not guarantee
-> future performance.
+> **免责声明：** 本项目仅用于研究和纸面模拟，不构成投资建议。项目没有实盘券商接口，
+> 不能发送真实订单。历史模拟结果不代表未来收益。
 
-## Quickstart
+## 安装与快速开始
 
-Requires Python 3.12+.
+需要 Python 3.12 或更高版本。
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
+```
 
-quant-trader backtest --config configs/default.yaml --data-root data --output run.json
+先运行完全离线的规则回测：
+
+```bash
+quant-trader backtest \
+  --config configs/default.yaml \
+  --data-root data \
+  --output run.json
+
 quant-trader report --run-json run.json --output report.html
+```
 
+纸面交易命令：
+
+```bash
 quant-trader paper init --db paper.db
 quant-trader paper status --db paper.db
 quant-trader paper run --db paper.db --config configs/default.yaml --confirm
 ```
 
-The checked-in snapshot covers all configured symbols from 2023-01-03 through 2025-12-31, so the
-quickstart is offline. To refresh it from Sina Finance later:
+`paper run` 只更新本地 SQLite 状态，不会连接券商或发送实盘订单。
+
+## 本地行情数据
+
+代码库内的数据快照覆盖全部默认标的，日期为 2023-01-03 至 2025-12-31，因此上述回测
+不需要联网。数据来源和校验和见 [`data/SOURCES.md`](data/SOURCES.md)。
+
+需要更新数据时，优先使用新浪财经：
 
 ```bash
-quant-trader data sync --source sina --config configs/default.yaml \
-  --start 2023-01-01 --end 2026-01-01 --data-root data
+quant-trader data sync \
+  --source sina \
+  --config configs/default.yaml \
+  --start 2023-01-01 \
+  --end 2026-01-01 \
+  --data-root data
 ```
 
-Yahoo remains an explicit fallback via `--source yahoo`. Snapshot provenance and checksums are in
-[`data/SOURCES.md`](data/SOURCES.md).
+Yahoo 只作为显式备用源，使用 `--source yahoo` 开启。
 
-Rules-only is the offline/default mode. `backtest --use-llm` optionally uses MiniMax or the user's
-locally authenticated Codex CLI. The LLM can only reduce or reject rules-selected targets. Hard
-limits remain 15% per position, 80% gross, long-only/no leverage, with drawdown reduction and a
-latched halt.
+## 策略与安全限制
 
-MiniMax remains the default LLM provider and requires `MINIMAX_API_KEY`. Its defaults target the
-China Token Plan endpoint (`https://api.minimaxi.com/v1`) with `MiniMax-M3`. Override
-`MINIMAX_BASE_URL` and `MINIMAX_MODEL` if your account uses a different region or model. The bundled
-three-year backtest can request hundreds of reviews, so first verify the key with a capped smoke run:
+默认模式完全由本地规则驱动。启用 LLM 后，模型也只能审核规则已经选出的候选标的，
+不能新增标的或提高规则给出的仓位。
+
+默认硬限制包括：
+
+- 只做多，不做空，不使用杠杆；
+- 单个标的最大仓位 15%；
+- 总持仓最大 80%，至少保留 20% 现金；
+- 回撤达到阈值后自动降仓或锁定停止；
+- LLM 或任一 Agent 出错时按 `reject / 0` 拒绝仓位；
+- 所有执行均为历史模拟或纸面交易。
+
+## 配置 MiniMax M3
+
+默认配置面向国内 MiniMax Token Plan：
+
+- API 地址：`https://api.minimaxi.com/v1`
+- 模型：`MiniMax-M3`
+- API Key 环境变量：`MINIMAX_API_KEY`
+
+先在当前终端配置 Key。不要把 Key 写入 YAML 或提交到代码库：
 
 ```bash
-quant-trader backtest --config configs/default.yaml --data-root data --output run.json \
-  --use-llm --llm-max-reviews 3
+export MINIMAX_API_KEY='你的 MiniMax API Key'
 ```
 
-The command prints each MiniMax review as it starts and completes. After the cap, remaining reviews
-use local rules-only replies and the output note marks the run as truncated.
+如果你的账号使用其他地址或模型，可以覆盖：
 
-To use a ChatGPT plan through Codex instead of a MiniMax key, first verify that the local CLI is
-installed and logged in:
+```bash
+export MINIMAX_BASE_URL='https://api.minimaxi.com/v1'
+export MINIMAX_MODEL='MiniMax-M3'
+```
+
+普通单审核回测可能产生很多调用，建议先限制为 3 次：
+
+```bash
+quant-trader backtest \
+  --config configs/default.yaml \
+  --data-root data \
+  --output run-minimax.json \
+  --use-llm \
+  --llm-max-reviews 3
+```
+
+达到上限后，剩余审核点会自动使用本地规则回复，输出文件会注明这次运行被截断。
+
+## 使用本地 Codex
+
+Codex 模式使用本机 Codex CLI 的登录状态，不需要 `MINIMAX_API_KEY`。先检查：
 
 ```bash
 codex --version
 codex login status
 ```
 
-If either command fails, repair or reinstall the official Codex CLI and run `codex login`. Then run
-one real review as a smoke test:
+如果未登录，执行 `codex login`。然后运行一次审核：
 
 ```bash
-quant-trader backtest --config configs/default.yaml --data-root data --output run.json \
-  --use-llm --llm-provider codex --llm-max-reviews 1
+quant-trader backtest \
+  --config configs/default.yaml \
+  --data-root data \
+  --output run-codex.json \
+  --use-llm \
+  --llm-provider codex \
+  --llm-max-reviews 1
 ```
 
-Codex runs are read-only and ephemeral. They use the local login rather than `MINIMAX_API_KEY`.
-When `--llm-max-reviews` is omitted in Codex mode, it defaults to three real reviews; all remaining
-review points use local rules-only replies and the output note records the truncation.
+Codex 调用是临时、只读的。未指定 `--llm-max-reviews` 时，普通 Codex 回测默认只调用
+3 次真实审核，之后回退本地规则。
 
-## TradingAgents MVP
+## TradingAgents 多 Agent 工作流
 
-The optional `trading-agents` workflow runs a fixed, single-round team: four analysts, bull/bear
-researchers, a research manager, trader, three risk analysts, and a portfolio manager. It reuses the
-same deterministic candidate and hard risk boundary as V1, so agents cannot add a ticker or increase
-its rules-selected weight.
+`trading-agents` 是固定单轮流程，不会递归调用工具。它包含 12 个逻辑角色：
 
-Run one point-in-time analysis with MiniMax:
+1. 市场分析师
+2. 情绪分析师
+3. 新闻分析师
+4. 基本面分析师
+5. 多方研究员
+6. 空方研究员
+7. 研究经理
+8. 交易员
+9. 激进风险分析师
+10. 中性风险分析师
+11. 保守风险分析师
+12. 投资组合经理
+
+没有额外上下文时，情绪、新闻和基本面角色会显示为 `skipped`，不会浪费 LLM 调用。
+此时一个完整工作流需要 9 次模型调用；三类上下文齐全时最多 12 次。
+
+### 单个标的一次性分析
+
+MiniMax：
 
 ```bash
-export MINIMAX_API_KEY='...'
-quant-trader agents analyze --ticker SPY --as-of 2025-12-31 \
-  --config configs/default.yaml --data-root data --output agent-run.json
+export MINIMAX_API_KEY='你的 MiniMax API Key'
+
+quant-trader agents analyze \
+  --ticker SPY \
+  --as-of 2025-12-31 \
+  --config configs/default.yaml \
+  --data-root data \
+  --output agent-run.json \
+  --llm-provider minimax
 ```
 
-Or use the locally authenticated Codex CLI:
+Codex：
 
 ```bash
-quant-trader agents analyze --ticker SPY --as-of 2025-12-31 \
-  --config configs/default.yaml --data-root data --output agent-run.json \
+quant-trader agents analyze \
+  --ticker SPY \
+  --as-of 2025-12-31 \
+  --config configs/default.yaml \
+  --data-root data \
+  --output agent-run.json \
   --llm-provider codex
 ```
 
-Without external context, sentiment, news, and fundamentals abstain, so one complete workflow uses
-nine provider calls. Supplying all three context types uses at most twelve. The CLI prints each active
-role as it starts and completes, and writes a compact audit trace without raw model output.
+只有确定性规则判定合格的标的才会调用 LLM。不合格时命令仍会正常生成 JSON，但
+`eligible` 为 `false`、`provider_calls` 为 `0`。
 
-To compare it in the chronological backtest:
-
-```bash
-quant-trader backtest --config configs/default.yaml --data-root data --output run.json \
-  --use-llm --llm-provider minimax --llm-workflow trading-agents
-```
-
-The backtest defaults to one complete multi-agent workflow and then uses local rules-only replies.
-Set `--llm-max-reviews N` explicitly to allow more complete workflows. Optional news, sentiment, and
-fundamentals input is accepted via `--context context.json`; every item is filtered by its observation
-date, and `agents analyze` rejects any item later than `--as-of`.
-
-Add `--dashboard` to watch the sanitized decision process update in a local browser while the
-command is running:
+### 在历史回测中启用多 Agent
 
 ```bash
-quant-trader agents analyze --ticker SPY --as-of 2025-12-31 \
-  --config configs/default.yaml --data-root data --output agent-run.json \
-  --llm-provider minimax --dashboard
-
-quant-trader backtest --config configs/default.yaml --data-root data --output run.json \
-  --use-llm --llm-workflow trading-agents --dashboard
+quant-trader backtest \
+  --config configs/default.yaml \
+  --data-root data \
+  --output run-agents.json \
+  --use-llm \
+  --llm-provider minimax \
+  --llm-workflow trading-agents
 ```
 
-The temporary dashboard listens only on `127.0.0.1`, uses a random per-run URL, and displays
-validated role summaries, risks, proposals, and final decisions. It never displays raw model output,
-prompts, credentials, or order controls, and closing it cannot alter the paper-trading result. The
-loaded page retains its last rendered state when the command exits; refreshing it afterward is not
-supported. `--dashboard` is intentionally unavailable for rules-only and single-review workflows.
+回测默认只运行 **1 个完整多 Agent 工作流**，之后的审核点回退本地规则。这样可以避免
+第一次运行就消耗大量额度。如果确实要运行更多完整工作流，显式设置：
+
+```bash
+--llm-max-reviews 2
+```
+
+这里的 `2` 表示两个完整 TradingAgents 工作流，不是两个单独的 Agent 调用。
+
+## 实时决策 Dashboard：详细使用方法
+
+Dashboard 用于观察 `agents analyze` 和 TradingAgents 回测运行期间的中间决策过程。
+它不是独立命令，只需要在原命令最后增加 `--dashboard`。
+
+目前 Dashboard **不接入** `paper run`，也不提供任何买卖按钮。它只是只读观察页面。
+
+### 方法一：观察单个标的分析（最容易理解）
+
+建议第一次先用这个方式。
+
+#### 第 1 步：激活环境
+
+```bash
+source .venv/bin/activate
+```
+
+如果使用 MiniMax，再确认 Key 已配置：
+
+```bash
+export MINIMAX_API_KEY='你的 MiniMax API Key'
+```
+
+#### 第 2 步：运行带 Dashboard 的分析
+
+下面的 `SPY / 2025-12-31` 在仓库内置数据中具有完整历史，适合作为示例：
+
+```bash
+quant-trader agents analyze \
+  --ticker SPY \
+  --as-of 2025-12-31 \
+  --config configs/default.yaml \
+  --data-root data \
+  --output agent-run.json \
+  --llm-provider minimax \
+  --dashboard
+```
+
+使用 Codex 时只需替换 Provider：
+
+```bash
+quant-trader agents analyze \
+  --ticker SPY \
+  --as-of 2025-12-31 \
+  --config configs/default.yaml \
+  --data-root data \
+  --output agent-run.json \
+  --llm-provider codex \
+  --dashboard
+```
+
+#### 第 3 步：观察终端输出
+
+命令启动后会打印类似内容：
+
+```text
+Dashboard: http://127.0.0.1:54321/一段随机token/
+Agent market_analyst started.
+Agent market_analyst completed.
+...
+```
+
+浏览器通常会自动打开。如果没有自动打开，请复制终端中完整的 `Dashboard:` URL 到浏览器，
+包括最后的随机 token 和 `/`，不要只复制端口。
+
+#### 第 4 步：理解页面
+
+页面顶部显示当前标的、分析日期、Provider、命令状态和已完成的工作流数量。
+
+12 个角色节点有五种状态：
+
+- `waiting`：等待上游角色完成；
+- `running`：当前正在调用 LLM；
+- `completed`：已得到并验证结构化结论；
+- `skipped`：没有对应时间点的外部上下文，因此主动跳过且不调用 LLM；
+- `failed`：输出无效或 Provider 失败，工作流将按安全规则拒绝仓位。
+
+点击任意已完成节点，可以查看：
+
+- 该角色的看多、看空或中性立场；
+- 信心分数；
+- 结构化摘要；
+- 使用的依据；
+- 识别出的风险和输入异常。
+
+页面下方还会依次出现：
+
+- **交易员建议**：`maintain / reduce / reject` 和权重倍数；
+- **最终组合决策**：风险评审后的最终动作；
+- **安全边界**：不能新增标的、不能提高规则仓位、失败自动拒绝、仅纸面交易。
+
+#### 第 5 步：等待命令结束
+
+不要因为某个角色运行时间较长就关闭终端。MiniMax/Codex 是逐角色同步调用，一个完整流程
+需要 9—12 次模型调用，耗时可能是数分钟。页面和终端都会显示当前具体卡在哪个角色。
+
+命令结束后：
+
+- 完整审计结果保存在 `agent-run.json`；
+- 已打开的页面会保留最后一次渲染结果；
+- 本地 Dashboard 服务会自动关闭；
+- 此时不要刷新页面，刷新后无法重新连接是正常现象。
+
+### 方法二：观察回测中的多 Agent 决策
+
+```bash
+quant-trader backtest \
+  --config configs/default.yaml \
+  --data-root data \
+  --output run-dashboard.json \
+  --use-llm \
+  --llm-provider minimax \
+  --llm-workflow trading-agents \
+  --dashboard
+```
+
+Codex 版本：
+
+```bash
+quant-trader backtest \
+  --config configs/default.yaml \
+  --data-root data \
+  --output run-dashboard.json \
+  --use-llm \
+  --llm-provider codex \
+  --llm-workflow trading-agents \
+  --dashboard
+```
+
+回测页面展示当前正在执行的候选工作流。默认第一个完整工作流结束后，后续审核使用本地
+规则，因此页面不会为每个历史日期都调用 12 个 Agent。如果想观察两个完整工作流：
+
+```bash
+quant-trader backtest \
+  --config configs/default.yaml \
+  --data-root data \
+  --output run-dashboard.json \
+  --use-llm \
+  --llm-provider minimax \
+  --llm-workflow trading-agents \
+  --llm-max-reviews 2 \
+  --dashboard
+```
+
+不要在第一次测试时设置很大的 `--llm-max-reviews`，否则模型调用量和运行时间会迅速增加。
+
+### Dashboard 的安全与隐私
+
+- 只监听本机 `127.0.0.1` 的随机端口；
+- 每次运行使用新的随机 URL token；
+- 只提供固定页面和只读状态接口；
+- 页面不显示原始模型输出、完整 Prompt、API Key 或隐藏推理；
+- 页面关闭、轮询失败或 Dashboard 内部异常不会改变交易决策；
+- Dashboard 不会写入或修改订单。
+
+### 常见问题
+
+#### 浏览器没有自动打开
+
+复制终端中 `Dashboard:` 后面的完整 URL，粘贴到本机浏览器。
+
+#### 页面显示断开，但终端命令还在运行
+
+先看终端是否仍有 `Agent ... started/completed` 输出。Dashboard 是旁路观察功能，页面断开
+不会中止 LLM 或改变结果；最终审计仍会写入 JSON。
+
+#### 报错 `--dashboard requires --use-llm and --llm-workflow trading-agents`
+
+回测 Dashboard 必须同时带上：
+
+```bash
+--use-llm --llm-workflow trading-agents --dashboard
+```
+
+规则回测和普通单审核工作流没有 12 个 Agent 事件，因此不能使用此 Dashboard。
+
+#### 页面很快结束，没有调用模型
+
+查看输出 JSON。如果 `eligible` 是 `false` 且 `provider_calls` 是 `0`，说明该标的在指定日期
+没有通过确定性趋势、流动性或历史长度规则。这不是 API 故障。可以先使用文档示例中的
+`SPY --as-of 2025-12-31`。
+
+#### 某些角色显示 `skipped`
+
+这是没有传入 `--context` 时的正常行为。市场、多空研究、交易和风险角色仍会继续执行。
+
+#### MiniMax 一直停在某个角色
+
+每个角色都是一次独立同步请求。先等待当前配置的超时和重试完成，同时检查网络、额度、
+`MINIMAX_API_KEY`、`MINIMAX_BASE_URL` 与 `MINIMAX_MODEL`。终端会明确显示当前角色名称。
+
+#### 命令结束后刷新页面打不开
+
+这是预期行为。Dashboard 是随命令启动的临时服务，命令结束后自动关闭。持久化结果请查看
+`agent-run.json` 或回测的 `run-dashboard.json`。
