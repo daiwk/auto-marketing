@@ -17,6 +17,90 @@ def test_cli_help_exits_successfully() -> None:
     assert result.exit_code == 0
 
 
+def test_backtest_help_lists_trading_agents_workflow() -> None:
+    result = CliRunner().invoke(app, ["backtest", "--help"], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 0
+    assert "trading-agents" in result.output
+
+
+def test_agents_analyze_ineligible_ticker_does_not_require_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    output = tmp_path / "analysis.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "analyze",
+            "--ticker",
+            "AAPL",
+            "--as-of",
+            "2023-01-03",
+            "--config",
+            "configs/default.yaml",
+            "--data-root",
+            "data",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(output.read_text())
+    assert payload["eligible"] is False
+    assert payload["provider_calls"] == 0
+
+
+def test_trading_agents_backtest_defaults_to_one_complete_workflow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeCodexReviewer:
+        def check_available(self) -> None:
+            return None
+
+        def complete(self, messages: tuple[ChatMessage, ...]) -> str:
+            return MaintainReviewer().complete(messages)
+
+    class FakeTradingAgentsReviewer:
+        calls = 0
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.traces: list[object] = []
+
+        def complete(self, messages: tuple[ChatMessage, ...]) -> str:
+            type(self).calls += 1
+            return MaintainReviewer().complete(messages)
+
+    monkeypatch.setattr("quant_trader.cli.CodexReviewer", FakeCodexReviewer)
+    monkeypatch.setattr(
+        "quant_trader.cli.TradingAgentsReviewer", FakeTradingAgentsReviewer
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "--config",
+            "configs/default.yaml",
+            "--data-root",
+            "data",
+            "--output",
+            str(tmp_path / "agents.json"),
+            "--use-llm",
+            "--llm-provider",
+            "codex",
+            "--llm-workflow",
+            "trading-agents",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert FakeTradingAgentsReviewer.calls == 1
+
+
 def test_data_sync_prints_concise_provider_error(monkeypatch) -> None:
     def fail(*args: object, **kwargs: object) -> None:
         raise DataValidationError("SPY: Yahoo Finance rate limited; wait a few minutes")
