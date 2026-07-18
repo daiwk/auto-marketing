@@ -8,26 +8,35 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
+import pandas as pd
 import typer
 
 from quant_trader.backtest import MaintainReviewer, buy_and_hold, run_backtest
-from quant_trader.config import load_settings
+from quant_trader.config import Settings, load_settings
 from quant_trader.data.cache import ParquetMarketCache
 from quant_trader.data.sina_source import SinaSource
 from quant_trader.data.validation import DataValidationError
 from quant_trader.data.yfinance_source import YFinanceSource
-from quant_trader.llm.base import MessageInput
+from quant_trader.llm.base import LLMReviewer, MessageInput
 from quant_trader.llm.codex import CodexError, CodexReviewer
-from quant_trader.llm.minimax import MiniMaxReviewer
+from quant_trader.llm.minimax import MiniMaxError, MiniMaxReviewer
 from quant_trader.paper import run_once
 from quant_trader.report import write_report
 from quant_trader.state import PaperState
+from quant_trader.strategies.v2_multi_agent import (
+    TradingAgentsReviewer,
+    load_external_context,
+    prepare_analysis,
+    reject_future_context,
+)
 
 app = typer.Typer(help="Safe US-equity research and paper-trading tools (never live trading).")
 data_app = typer.Typer(help="Manage the validated local market-data cache.")
 paper_app = typer.Typer(help="Run one confirmed, paper-only cycle.")
+agents_app = typer.Typer(help="Run bounded TradingAgents-style paper analysis.")
 app.add_typer(data_app, name="data")
 app.add_typer(paper_app, name="paper")
+app.add_typer(agents_app, name="agents")
 
 
 class MarketSource(StrEnum):
@@ -38,6 +47,11 @@ class MarketSource(StrEnum):
 class LLMProvider(StrEnum):
     MINIMAX = "minimax"
     CODEX = "codex"
+
+
+class LLMWorkflow(StrEnum):
+    SINGLE = "single"
+    TRADING_AGENTS = "trading-agents"
 
 
 @data_app.command("sync")
@@ -61,9 +75,34 @@ def data_sync(
         raise typer.Exit(code=1) from None
 
 
-def _frames(data_root: Path, tickers: tuple[str, ...]) -> dict[str, object]:
+def _frames(data_root: Path, tickers: tuple[str, ...]) -> dict[str, pd.DataFrame]:
     cache = ParquetMarketCache(data_root)
     return {ticker: cache.read(ticker) for ticker in tickers}
+
+
+def _open_provider(
+    settings: Settings, provider: LLMProvider
+) -> tuple[LLMReviewer, MiniMaxReviewer | None, str]:
+    if provider is LLMProvider.CODEX:
+        codex = CodexReviewer()
+        codex.check_available()
+        return codex, None, "Codex"
+    key = settings.llm.api_key.get_secret_value()
+    if not key:
+        raise typer.BadParameter("MiniMax reviews require MINIMAX_API_KEY")
+    client = MiniMaxReviewer(
+        key,
+        settings.llm.base_url,
+        settings.llm.model,
+        settings.llm.timeout_seconds,
+        settings.llm.max_retries,
+    )
+    return client, client, "MiniMax"
+
+
+def _write_json(output: Path, payload: object) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 class _CountingReviewer:
@@ -118,6 +157,18 @@ def backtest(
         LLMProvider,
         typer.Option(help="Review provider: minimax requires an API key; codex uses local login."),
     ] = LLMProvider.MINIMAX,
+    llm_workflow: Annotated[
+        LLMWorkflow,
+        typer.Option(help="Review workflow: one reviewer or a bounded multi-agent workflow."),
+    ] = LLMWorkflow.SINGLE,
+    context: Annotated[
+        Path | None,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            help="Optional point-in-time agent context JSON.",
+        ),
+    ] = None,
     llm_max_reviews: Annotated[
         int | None,
         typer.Option(
@@ -134,29 +185,33 @@ def backtest(
     frames = _frames(data_root, settings.universe)
     reviewer = None
     client = None
+    agent_reviewer: TradingAgentsReviewer | None = None
     try:
         if use_llm:
-            if llm_provider is LLMProvider.CODEX:
-                codex = CodexReviewer()
-                codex.check_available()
-                max_reviews = 3 if llm_max_reviews is None else llm_max_reviews
-                reviewer = _ProgressReviewer(
-                    codex, max_reviews=max_reviews, provider_name="Codex"
+            external_context = (
+                load_external_context(context)
+                if llm_workflow is LLMWorkflow.TRADING_AGENTS
+                else None
+            )
+            provider, client, provider_name = _open_provider(settings, llm_provider)
+            max_reviews: int | None
+            if llm_workflow is LLMWorkflow.TRADING_AGENTS:
+                agent_reviewer = TradingAgentsReviewer(
+                    provider,
+                    provider_name=provider_name,
+                    external_context=external_context,
                 )
+                provider = agent_reviewer
+                max_reviews = 1 if llm_max_reviews is None else llm_max_reviews
             else:
-                key = settings.llm.api_key.get_secret_value()
-                if not key:
-                    raise typer.BadParameter("MiniMax reviews require MINIMAX_API_KEY")
-                client = MiniMaxReviewer(
-                    key,
-                    settings.llm.base_url,
-                    settings.llm.model,
-                    settings.llm.timeout_seconds,
-                    settings.llm.max_retries,
+                max_reviews = (
+                    3
+                    if llm_provider is LLMProvider.CODEX and llm_max_reviews is None
+                    else llm_max_reviews
                 )
-                reviewer = _ProgressReviewer(
-                    client, max_reviews=llm_max_reviews, provider_name="MiniMax"
-                )
+            reviewer = _ProgressReviewer(
+                provider, max_reviews=max_reviews, provider_name=provider_name
+            )
         rules_counter = _CountingReviewer()
         rules_result = run_backtest(frames, settings, reviewer=rules_counter)  # type: ignore[arg-type]
         if use_llm:
@@ -171,7 +226,7 @@ def backtest(
             if reviewer is not None
             else None
         )
-    except CodexError as error:
+    except (CodexError, MiniMaxError, ValueError) as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from None
     finally:
@@ -194,9 +249,83 @@ def backtest(
         and llm_result.metrics()["total_return"] <= rules_result.metrics()["total_return"]
     ):
         note = "LLM run shows no proven gain over rules-only after costs."
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({"runs": runs, "note": note}, indent=2), encoding="utf-8")
+    payload: dict[str, object] = {"runs": runs, "note": note}
+    if agent_reviewer is not None and agent_reviewer.traces:
+        payload["agent_traces"] = [
+            trace.model_dump(mode="json") for trace in agent_reviewer.traces
+        ]
+    _write_json(output, payload)
     typer.echo(str(output))
+
+
+@agents_app.command("analyze")
+def agents_analyze(
+    ticker: Annotated[str, typer.Option()],
+    as_of: Annotated[datetime, typer.Option(formats=["%Y-%m-%d"])],
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output: Annotated[Path, typer.Option()],
+    context: Annotated[
+        Path | None,
+        typer.Option(exists=True, dir_okay=False, help="Optional point-in-time context JSON."),
+    ] = None,
+    llm_provider: Annotated[
+        LLMProvider,
+        typer.Option(help="Provider: minimax requires an API key; codex uses local login."),
+    ] = LLMProvider.MINIMAX,
+) -> None:
+    """Analyze one eligible ticker once; never places an order."""
+    client = None
+    try:
+        settings = load_settings(config)
+        point_in_time = as_of.date()
+        external_context = load_external_context(context)
+        reject_future_context(external_context, ticker, point_in_time)
+        prepared = prepare_analysis(
+            _frames(data_root, settings.universe), settings, ticker, point_in_time
+        )
+        if not prepared.eligible:
+            _write_json(
+                output,
+                {
+                    "workflow": LLMWorkflow.TRADING_AGENTS,
+                    "ticker": prepared.ticker,
+                    "as_of": prepared.as_of.isoformat(),
+                    "eligible": False,
+                    "provider_calls": 0,
+                    "reason": prepared.reason,
+                },
+            )
+            typer.echo(str(output))
+            return
+        provider, client, provider_name = _open_provider(settings, llm_provider)
+        reviewer = TradingAgentsReviewer(
+            provider,
+            provider_name=provider_name,
+            external_context=external_context,
+        )
+        assert prepared.messages is not None
+        reviewer.complete(prepared.messages)
+        trace = reviewer.traces[-1]
+        _write_json(
+            output,
+            {
+                "workflow": LLMWorkflow.TRADING_AGENTS,
+                "provider": provider_name,
+                "ticker": prepared.ticker,
+                "as_of": prepared.as_of.isoformat(),
+                "eligible": True,
+                "provider_calls": trace.provider_calls,
+                "trace": trace.model_dump(mode="json"),
+            },
+        )
+        typer.echo(str(output))
+    except (CodexError, MiniMaxError, ValueError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from None
+    finally:
+        if client is not None:
+            client.close()
 
 
 @paper_app.command("init")
