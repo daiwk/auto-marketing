@@ -73,3 +73,42 @@ quant-trader backtest --config configs/default.yaml --data-root data --output ru
 Codex runs are read-only and ephemeral. They use the local login rather than `MINIMAX_API_KEY`.
 When `--llm-max-reviews` is omitted in Codex mode, it defaults to three real reviews; all remaining
 review points use local rules-only replies and the output note records the truncation.
+
+## TradingAgents MVP
+
+The optional `trading-agents` workflow runs a fixed, single-round team: four analysts, bull/bear
+researchers, a research manager, trader, three risk analysts, and a portfolio manager. It reuses the
+same deterministic candidate and hard risk boundary as V1, so agents cannot add a ticker or increase
+its rules-selected weight.
+
+Run one point-in-time analysis with MiniMax:
+
+```bash
+export MINIMAX_API_KEY='...'
+quant-trader agents analyze --ticker SPY --as-of 2025-12-31 \
+  --config configs/default.yaml --data-root data --output agent-run.json
+```
+
+Or use the locally authenticated Codex CLI:
+
+```bash
+quant-trader agents analyze --ticker SPY --as-of 2025-12-31 \
+  --config configs/default.yaml --data-root data --output agent-run.json \
+  --llm-provider codex
+```
+
+Without external context, sentiment, news, and fundamentals abstain, so one complete workflow uses
+nine provider calls. Supplying all three context types uses at most twelve. The CLI prints each active
+role as it starts and completes, and writes a compact audit trace without raw model output.
+
+To compare it in the chronological backtest:
+
+```bash
+quant-trader backtest --config configs/default.yaml --data-root data --output run.json \
+  --use-llm --llm-provider minimax --llm-workflow trading-agents
+```
+
+The backtest defaults to one complete multi-agent workflow and then uses local rules-only replies.
+Set `--llm-max-reviews N` explicitly to allow more complete workflows. Optional news, sentiment, and
+fundamentals input is accepted via `--context context.json`; every item is filtered by its observation
+date, and `agents analyze` rejects any item later than `--as-of`.

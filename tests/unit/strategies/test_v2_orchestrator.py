@@ -205,6 +205,22 @@ def test_invalid_role_json_fails_closed_without_retrying_workflow() -> None:
     assert "not json" not in orchestrator.traces[0].model_dump_json()
 
 
+def test_progress_callback_reports_the_active_role() -> None:
+    events: list[tuple[RoleName, str]] = []
+    orchestrator = TradingAgentsReviewer(
+        ScriptedReviewer(["not json"]),
+        provider_name="MiniMax",
+        on_progress=lambda role, status: events.append((role, status)),
+    )
+
+    orchestrator.complete(_messages())
+
+    assert events == [
+        (RoleName.MARKET, "started"),
+        (RoleName.MARKET, "failed"),
+    ]
+
+
 def test_provider_exception_fails_closed_without_secret_leak() -> None:
     class BrokenReviewer:
         calls = 0

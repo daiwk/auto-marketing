@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import traceback
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from typing import Any
 
@@ -116,6 +116,7 @@ class TradingAgentsReviewer:
         *,
         provider_name: str,
         external_context: ExternalContext | None = None,
+        on_progress: Callable[[RoleName, str], None] | None = None,
     ) -> None:
         if not callable(getattr(provider, "complete", None)):
             raise TypeError("provider must implement complete(messages)")
@@ -124,26 +125,38 @@ class TradingAgentsReviewer:
         self._provider = provider
         self._provider_name = provider_name.strip()
         self._context = external_context or ExternalContext()
+        self._on_progress = on_progress
         self.traces: list[DecisionTrace] = []
 
     def _complete(self, messages: Sequence[MessageInput]) -> str:
         return self._provider.complete(messages)
 
+    def _notify(self, role: RoleName, status: str) -> None:
+        if self._on_progress is not None:
+            self._on_progress(role, status)
+
     def _report(self, role: RoleName, payload: Mapping[str, object]) -> RoleReport:
+        self._notify(role, "started")
         raw = self._complete(render_report_prompt(role, payload))
         parsed = RoleReport.model_validate(_safe_json(raw))
         if parsed.role is not role or parsed.status is not ReportStatus.AVAILABLE:
             raise ValueError("role response provenance does not match the requested role")
+        self._notify(role, "completed")
         return parsed
 
     def _trader(self, payload: Mapping[str, object]) -> TraderProposal:
+        self._notify(RoleName.TRADER, "started")
         raw = self._complete(render_trader_prompt(payload))
-        return TraderProposal.model_validate(_safe_json(raw))
+        result = TraderProposal.model_validate(_safe_json(raw))
+        self._notify(RoleName.TRADER, "completed")
+        return result
 
     def _portfolio(self, payload: Mapping[str, object], proposal: TraderProposal) -> LLMReview:
+        self._notify(RoleName.PORTFOLIO_MANAGER, "started")
         result = parse_review(self._complete(render_portfolio_prompt(payload)))
         if result.weight_multiplier > proposal.weight_multiplier:
             raise ValueError("portfolio manager cannot increase the trader multiplier")
+        self._notify(RoleName.PORTFOLIO_MANAGER, "completed")
         return result
 
     @staticmethod
@@ -226,6 +239,7 @@ class TradingAgentsReviewer:
             )
             failure_role = None
         except Exception as error:
+            self._notify(current_role, "failed")
             _clear_error(error)
             final = _synthetic_reject(current_role)
             failure_role = current_role

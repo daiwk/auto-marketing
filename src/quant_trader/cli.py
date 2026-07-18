@@ -105,6 +105,11 @@ def _write_json(output: Path, payload: object) -> None:
     output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _agent_progress(role: object, status: str) -> None:
+    role_name = getattr(role, "value", str(role))
+    typer.echo(f"Agent {role_name} {status}.", err=True)
+
+
 class _CountingReviewer:
     def __init__(self) -> None:
         self.calls = 0
@@ -200,6 +205,7 @@ def backtest(
                     provider,
                     provider_name=provider_name,
                     external_context=external_context,
+                    on_progress=_agent_progress,
                 )
                 provider = agent_reviewer
                 max_reviews = 1 if llm_max_reviews is None else llm_max_reviews
@@ -303,6 +309,7 @@ def agents_analyze(
             provider,
             provider_name=provider_name,
             external_context=external_context,
+            on_progress=_agent_progress,
         )
         assert prepared.messages is not None
         reviewer.complete(prepared.messages)
