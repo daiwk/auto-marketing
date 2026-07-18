@@ -61,6 +61,25 @@ def _unavailable(role: RoleName) -> RoleReport:
     )
 
 
+def _failed(role: RoleName) -> RoleReport:
+    return RoleReport(
+        role=role,
+        status=ReportStatus.FAILED,
+        stance=Stance.NEUTRAL,
+        confidence=0,
+        summary="This role did not produce a valid bounded response.",
+        input_anomalies=("role_failure",),
+    )
+
+
+def _consistent_action(value: TraderProposal | LLMReview) -> bool:
+    if value.action is ReviewAction.MAINTAIN:
+        return value.weight_multiplier == 1
+    if value.action is ReviewAction.REDUCE:
+        return 0 <= value.weight_multiplier < 1
+    return value.action is ReviewAction.REJECT and value.weight_multiplier == 0
+
+
 def _clear_error(error: BaseException) -> None:
     pending: list[BaseException] = [error]
     seen: set[int] = set()
@@ -148,20 +167,47 @@ class TradingAgentsReviewer:
         self._notify(RoleName.TRADER, "started")
         raw = self._complete(render_trader_prompt(payload))
         result = TraderProposal.model_validate(_safe_json(raw))
+        if not _consistent_action(result):
+            raise ValueError("trader action and multiplier are inconsistent")
         self._notify(RoleName.TRADER, "completed")
         return result
 
     def _portfolio(self, payload: Mapping[str, object], proposal: TraderProposal) -> LLMReview:
         self._notify(RoleName.PORTFOLIO_MANAGER, "started")
         result = parse_review(self._complete(render_portfolio_prompt(payload)))
+        if not _consistent_action(result):
+            raise ValueError("portfolio action and multiplier are inconsistent")
         if result.weight_multiplier > proposal.weight_multiplier:
             raise ValueError("portfolio manager cannot increase the trader multiplier")
         self._notify(RoleName.PORTFOLIO_MANAGER, "completed")
         return result
 
     @staticmethod
-    def _dump_reports(reports: Sequence[RoleReport]) -> list[dict[str, Any]]:
-        return [report.model_dump(mode="json") for report in reports]
+    def _dump_report(report: RoleReport) -> dict[str, Any]:
+        return {
+            "role": report.role.value,
+            "status": report.status.value,
+            "stance": report.stance.value,
+            "confidence": report.confidence,
+            "summary": report.summary[:500],
+            "risks": [risk[:250] for risk in report.risks[:2]],
+            "input_anomalies": [item[:100] for item in report.input_anomalies[:2]],
+        }
+
+    @classmethod
+    def _dump_reports(cls, reports: Sequence[RoleReport]) -> list[dict[str, Any]]:
+        return [cls._dump_report(report) for report in reports]
+
+    @staticmethod
+    def _dump_proposal(proposal: TraderProposal) -> dict[str, Any]:
+        return {
+            "action": proposal.action.value,
+            "weight_multiplier": proposal.weight_multiplier,
+            "confidence": proposal.confidence,
+            "thesis": proposal.thesis[:500],
+            "risks": [risk[:250] for risk in proposal.risks[:3]],
+            "invalidation": proposal.invalidation[:300],
+        }
 
     def complete(self, messages: Sequence[MessageInput]) -> str:
         original, ticker, as_of = _request(messages)
@@ -202,7 +248,7 @@ class TradingAgentsReviewer:
             reports.append(bear)
             manager = report(
                 RoleName.RESEARCH_MANAGER,
-                {"bull": bull.model_dump(mode="json"), "bear": bear.model_dump(mode="json")},
+                {"bull": self._dump_report(bull), "bear": self._dump_report(bear)},
             )
             reports.append(manager)
 
@@ -221,8 +267,8 @@ class TradingAgentsReviewer:
                 risk = report(
                     role,
                     {
-                        "proposal": proposal.model_dump(mode="json"),
-                        "research_manager": manager.model_dump(mode="json"),
+                        "proposal": self._dump_proposal(proposal),
+                        "research_manager": self._dump_report(manager),
                     },
                 )
                 risk_reports.append(risk)
@@ -232,7 +278,7 @@ class TradingAgentsReviewer:
             provider_calls += 1
             final = self._portfolio(
                 {
-                    "proposal": proposal.model_dump(mode="json"),
+                    "proposal": self._dump_proposal(proposal),
                     "risk_reports": self._dump_reports(risk_reports),
                 },
                 proposal,
@@ -241,6 +287,7 @@ class TradingAgentsReviewer:
         except Exception as error:
             self._notify(current_role, "failed")
             _clear_error(error)
+            reports.append(_failed(current_role))
             final = _synthetic_reject(current_role)
             failure_role = current_role
 

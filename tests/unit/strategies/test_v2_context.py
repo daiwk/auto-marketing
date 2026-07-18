@@ -103,6 +103,17 @@ def test_context_rejects_oversized_file(tmp_path: Path) -> None:
         load_external_context(path)
 
 
+def test_context_rejects_duplicate_raw_json_keys(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate.json"
+    path.write_text(
+        '{"tickers":{"AAPL":{"news":[]},"AAPL":{"sentiment":[]}}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="valid UTF-8 JSON"):
+        load_external_context(path)
+
+
 def test_missing_context_is_empty() -> None:
     context = load_external_context(None)
 

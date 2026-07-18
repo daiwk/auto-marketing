@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 
@@ -18,6 +19,15 @@ from quant_trader.strategies.v2_multi_agent.models import (
 MAX_CONTEXT_BYTES = 65_536
 
 
+def _unique_object(pairs: Iterable[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 def load_external_context(path: Path | None) -> ExternalContext:
     if path is None:
         return ExternalContext()
@@ -29,8 +39,8 @@ def load_external_context(path: Path | None) -> ExternalContext:
     if len(raw) > MAX_CONTEXT_BYTES:
         raise ValueError("context file exceeds 65536 bytes")
     try:
-        payload = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = json.loads(raw, object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, ValueError):
         raise ValueError("context file must be valid UTF-8 JSON") from None
     try:
         return ExternalContext.model_validate(payload)

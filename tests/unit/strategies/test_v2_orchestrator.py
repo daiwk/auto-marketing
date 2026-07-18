@@ -10,6 +10,7 @@ from quant_trader.llm.base import ChatMessage, MessageInput, canonical_messages
 from quant_trader.llm.parsing import parse_review
 from quant_trader.strategies.v1_rules_llm.prompt import render_review_prompt
 from quant_trader.strategies.v1_rules_llm.rules import Candidate
+from quant_trader.strategies.v1_rules_llm.strategy import review_candidate
 from quant_trader.strategies.v2_multi_agent.models import (
     ExternalContext,
     RoleName,
@@ -75,6 +76,21 @@ def _final() -> str:
             "risks": ["High volatility."],
             "invalidation": "Momentum turns negative.",
             "input_anomalies": [],
+        }
+    )
+
+
+def _large_report(role: RoleName) -> str:
+    return json.dumps(
+        {
+            "role": role.value,
+            "status": "available",
+            "stance": "neutral",
+            "confidence": 0.5,
+            "summary": "s" * 2_000,
+            "evidence": ["e" * 2_000, "e" * 2_000],
+            "risks": ["r" * 2_000, "r" * 2_000],
+            "input_anomalies": ["a" * 2_000],
         }
     )
 
@@ -192,6 +208,28 @@ def test_market_only_workflow_abstains_without_spending_calls() -> None:
     assert unavailable == {RoleName.SENTIMENT, RoleName.NEWS, RoleName.FUNDAMENTALS}
 
 
+def test_large_valid_reports_are_compacted_before_downstream_prompts() -> None:
+    outputs = [
+        _large_report(RoleName.MARKET),
+        _large_report(RoleName.BULL),
+        _large_report(RoleName.BEAR),
+        _large_report(RoleName.RESEARCH_MANAGER),
+        _proposal(),
+        _large_report(RoleName.AGGRESSIVE_RISK),
+        _large_report(RoleName.NEUTRAL_RISK),
+        _large_report(RoleName.CONSERVATIVE_RISK),
+        _final(),
+    ]
+    scripted = ScriptedReviewer(outputs)
+    orchestrator = TradingAgentsReviewer(scripted, provider_name="MiniMax")
+
+    result = parse_review(orchestrator.complete(_messages()))
+
+    assert result.action is ReviewAction.REDUCE
+    assert scripted.calls == 9
+    assert orchestrator.traces[0].failure_role is None
+
+
 def test_invalid_role_json_fails_closed_without_retrying_workflow() -> None:
     scripted = ScriptedReviewer(["not json"])
     orchestrator = TradingAgentsReviewer(scripted, provider_name="MiniMax")
@@ -202,7 +240,61 @@ def test_invalid_role_json_fails_closed_without_retrying_workflow() -> None:
     assert result.weight_multiplier == 0
     assert scripted.calls == 1
     assert orchestrator.traces[0].failure_role is RoleName.MARKET
+    assert orchestrator.traces[0].reports[-1].status.value == "failed"
     assert "not json" not in orchestrator.traces[0].model_dump_json()
+
+
+def test_inconsistent_trader_rejection_cannot_be_repaired_into_maintain() -> None:
+    outputs = [
+        _report(RoleName.MARKET),
+        _report(RoleName.BULL),
+        _report(RoleName.BEAR),
+        _report(RoleName.RESEARCH_MANAGER),
+        json.dumps(
+            {
+                "action": "reject",
+                "weight_multiplier": 1,
+                "confidence": 0.5,
+                "thesis": "Reject candidate.",
+                "risks": [],
+                "invalidation": "New evidence.",
+            }
+        ),
+    ]
+    orchestrator = TradingAgentsReviewer(ScriptedReviewer(outputs), provider_name="Codex")
+
+    outcome = review_candidate(
+        orchestrator, _messages(), model="Codex", prompt_version="v2"
+    )
+
+    assert outcome.review.action is ReviewAction.REJECT
+    assert outcome.review.weight_multiplier == 0
+    assert outcome.repair_used is False
+    assert orchestrator.traces[0].failure_role is RoleName.TRADER
+
+
+def test_inconsistent_portfolio_rejection_fails_closed() -> None:
+    outputs = _complete_outputs()
+    outputs[-1] = json.dumps(
+        {
+            "action": "reject",
+            "weight_multiplier": 0.5,
+            "confidence": 0.5,
+            "thesis": "Reject candidate.",
+            "risks": [],
+            "invalidation": "New evidence.",
+            "input_anomalies": [],
+        }
+    )
+    orchestrator = TradingAgentsReviewer(
+        ScriptedReviewer(outputs), provider_name="MiniMax", external_context=_context()
+    )
+
+    result = parse_review(orchestrator.complete(_messages()))
+
+    assert result.action is ReviewAction.REJECT
+    assert result.weight_multiplier == 0
+    assert orchestrator.traces[0].failure_role is RoleName.PORTFOLIO_MANAGER
 
 
 def test_progress_callback_reports_the_active_role() -> None:
