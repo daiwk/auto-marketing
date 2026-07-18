@@ -28,8 +28,10 @@ one non-interactive local Codex process, and return its final text response.
 
 The reviewer launches `codex exec` with an argument list and `shell=False`, sends the prompt on
 standard input, disables repository mutation with Codex's read-only sandbox, and captures only the
-final response. It applies a configurable timeout and bounded output size. No market data, prompt,
-credentials, or model response is written to temporary project files.
+final response through `--output-last-message`. It uses `--ephemeral` so Codex does not persist a
+session, applies a configurable timeout, and bounds the response read. The short-lived response file
+lives in an OS temporary directory and is removed immediately; no market data, prompt, credentials,
+or model response is written into the project.
 
 The existing progress/cap wrapper remains provider-independent. The CLI constructs either a
 `MiniMaxReviewer` or `CodexReviewer`, prints provider-specific progress, and falls back to the
