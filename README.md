@@ -36,14 +36,15 @@ quant-trader data sync --source sina --config configs/default.yaml \
 Yahoo remains an explicit fallback via `--source yahoo`. Snapshot provenance and checksums are in
 [`data/SOURCES.md`](data/SOURCES.md).
 
-Rules-only is the offline/default mode. `backtest --use-llm` is optional and requires
-`MINIMAX_API_KEY`; the LLM can only reduce or reject rules-selected targets. Hard limits remain
-15% per position, 80% gross, long-only/no leverage, with drawdown reduction and a latched halt.
-The default MiniMax settings target the China Token Plan endpoint (`https://api.minimaxi.com/v1`)
-with `MiniMax-M3`. Override `MINIMAX_BASE_URL` and `MINIMAX_MODEL` if your account uses a different
-region or model.
-The bundled three-year backtest can request hundreds of LLM reviews, so first verify your API key
-with a capped smoke run:
+Rules-only is the offline/default mode. `backtest --use-llm` optionally uses MiniMax or the user's
+locally authenticated Codex CLI. The LLM can only reduce or reject rules-selected targets. Hard
+limits remain 15% per position, 80% gross, long-only/no leverage, with drawdown reduction and a
+latched halt.
+
+MiniMax remains the default LLM provider and requires `MINIMAX_API_KEY`. Its defaults target the
+China Token Plan endpoint (`https://api.minimaxi.com/v1`) with `MiniMax-M3`. Override
+`MINIMAX_BASE_URL` and `MINIMAX_MODEL` if your account uses a different region or model. The bundled
+three-year backtest can request hundreds of reviews, so first verify the key with a capped smoke run:
 
 ```bash
 quant-trader backtest --config configs/default.yaml --data-root data --output run.json \
@@ -52,3 +53,23 @@ quant-trader backtest --config configs/default.yaml --data-root data --output ru
 
 The command prints each MiniMax review as it starts and completes. After the cap, remaining reviews
 use local rules-only replies and the output note marks the run as truncated.
+
+To use a ChatGPT plan through Codex instead of a MiniMax key, first verify that the local CLI is
+installed and logged in:
+
+```bash
+codex --version
+codex login status
+```
+
+If either command fails, repair or reinstall the official Codex CLI and run `codex login`. Then run
+one real review as a smoke test:
+
+```bash
+quant-trader backtest --config configs/default.yaml --data-root data --output run.json \
+  --use-llm --llm-provider codex --llm-max-reviews 1
+```
+
+Codex runs are read-only and ephemeral. They use the local login rather than `MINIMAX_API_KEY`.
+When `--llm-max-reviews` is omitted in Codex mode, it defaults to three real reviews; all remaining
+review points use local rules-only replies and the output note records the truncation.
