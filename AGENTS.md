@@ -21,7 +21,8 @@ These instructions apply to the entire repository.
   change warrants them.
 - Fix confirmed critical issues directly; do not add lengthy approval or review loops.
 - Keep user-facing updates short and outcome-oriented.
-- When requested, commit, push, and open a pull request without adding unrelated changes.
+- After completing and validating an implementation task, commit it, push the branch, and open a
+  pull request by default unless the user explicitly asks not to. Do not add unrelated changes.
 - Preserve existing user files and untracked run artifacts.
 
 ## Project boundaries

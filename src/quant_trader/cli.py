@@ -120,6 +120,12 @@ def _agent_progress(role: object, status: str) -> None:
     typer.echo(f"Agent {role_name} {status}.", err=True)
 
 
+def _append_agent_event(output: Path, event: AgentEvent) -> None:
+    """Append one sanitized structured event for an external local observer."""
+    with output.open("a", encoding="utf-8") as destination:
+        destination.write(event.model_dump_json() + "\n")
+
+
 class _DashboardRun:
     def __init__(self, enabled: bool) -> None:
         self.state = DashboardState()
@@ -427,6 +433,10 @@ def backtest(
         bool,
         typer.Option(help="Open a local real-time TradingAgents decision dashboard."),
     ] = False,
+    agent_events: Annotated[
+        Path | None,
+        typer.Option(help="Optional JSONL stream of sanitized TradingAgents events for local UIs."),
+    ] = None,
 ) -> None:
     """Run cached chronological simulation (rules-only by default)."""
     settings = load_settings(config)
@@ -436,11 +446,28 @@ def backtest(
         raise typer.BadParameter(
             "--dashboard requires --use-llm and --llm-workflow trading-agents"
         )
+    if agent_events is not None and (
+        not use_llm or llm_workflow is not LLMWorkflow.TRADING_AGENTS
+    ):
+        raise typer.BadParameter(
+            "--agent-events requires --use-llm and --llm-workflow trading-agents"
+        )
     frames = _frames(data_root, settings.universe)
     reviewer = None
     client = None
     agent_reviewer: TradingAgentsReviewer | None = None
     dashboard_run = _DashboardRun(dashboard)
+    if agent_events is not None:
+        agent_events.parent.mkdir(parents=True, exist_ok=True)
+        agent_events.write_text("", encoding="utf-8")
+
+    def observe_agent(event: AgentEvent) -> None:
+        observer = dashboard_run.observer
+        if observer is not None:
+            observer(event)
+        if agent_events is not None:
+            _append_agent_event(agent_events, event)
+
     try:
         dashboard_run.start()
         if use_llm:
@@ -457,7 +484,7 @@ def backtest(
                     provider_name=provider_name,
                     external_context=external_context,
                     on_progress=_agent_progress,
-                    on_event=dashboard_run.observer,
+                    on_event=(observe_agent if dashboard or agent_events is not None else None),
                 )
                 provider = agent_reviewer
                 max_reviews = 1 if llm_max_reviews is None else llm_max_reviews
