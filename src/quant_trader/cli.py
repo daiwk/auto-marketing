@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import traceback
+from collections.abc import Callable
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -13,6 +15,7 @@ import typer
 
 from quant_trader.backtest import MaintainReviewer, buy_and_hold, run_backtest
 from quant_trader.config import Settings, load_settings
+from quant_trader.dashboard import DashboardError, DashboardServer, DashboardState
 from quant_trader.data.cache import ParquetMarketCache
 from quant_trader.data.sina_source import SinaSource
 from quant_trader.data.validation import DataValidationError
@@ -24,6 +27,7 @@ from quant_trader.paper import run_once
 from quant_trader.report import write_report
 from quant_trader.state import PaperState
 from quant_trader.strategies.v2_multi_agent import (
+    AgentEvent,
     TradingAgentsReviewer,
     load_external_context,
     prepare_analysis,
@@ -110,6 +114,53 @@ def _agent_progress(role: object, status: str) -> None:
     typer.echo(f"Agent {role_name} {status}.", err=True)
 
 
+class _DashboardRun:
+    def __init__(self, enabled: bool) -> None:
+        self.state = DashboardState()
+        self.server = DashboardServer(self.state) if enabled else None
+        self._started = False
+
+    @property
+    def observer(self) -> Callable[[AgentEvent], None] | None:
+        return self.state.publish if self.server is not None else None
+
+    def start(self) -> None:
+        if self.server is not None:
+            typer.echo(f"Dashboard: {self.server.start()}", err=True)
+            self._started = True
+
+    def prepare(self, ticker: str, as_of: str, provider: str) -> None:
+        if self.server is None or not self._started:
+            return
+        try:
+            self.state.prepare(ticker, as_of, provider)
+        except Exception as error:
+            self._clear(error)
+
+    def finish(self, status: str, *, reason: str | None = None) -> None:
+        if self.server is None or not self._started:
+            return
+        try:
+            version = self.state.set_command_status(status, reason=reason)
+            self.state.wait_until_seen(version, timeout_seconds=1.0)
+        except Exception as error:
+            self._clear(error)
+
+    def close(self) -> None:
+        if self.server is not None:
+            try:
+                self.server.stop()
+            except Exception as error:
+                self._clear(error)
+            self._started = False
+
+    @staticmethod
+    def _clear(error: BaseException) -> None:
+        if error.__traceback__ is not None:
+            traceback.clear_frames(error.__traceback__)
+        error.__traceback__ = None
+
+
 class _CountingReviewer:
     def __init__(self) -> None:
         self.calls = 0
@@ -184,14 +235,26 @@ def backtest(
             ),
         ),
     ] = None,
+    dashboard: Annotated[
+        bool,
+        typer.Option(help="Open a local real-time TradingAgents decision dashboard."),
+    ] = False,
 ) -> None:
     """Run cached chronological simulation (rules-only by default)."""
     settings = load_settings(config)
+    if dashboard and (
+        not use_llm or llm_workflow is not LLMWorkflow.TRADING_AGENTS
+    ):
+        raise typer.BadParameter(
+            "--dashboard requires --use-llm and --llm-workflow trading-agents"
+        )
     frames = _frames(data_root, settings.universe)
     reviewer = None
     client = None
     agent_reviewer: TradingAgentsReviewer | None = None
+    dashboard_run = _DashboardRun(dashboard)
     try:
+        dashboard_run.start()
         if use_llm:
             external_context = (
                 load_external_context(context)
@@ -206,6 +269,7 @@ def backtest(
                     provider_name=provider_name,
                     external_context=external_context,
                     on_progress=_agent_progress,
+                    on_event=dashboard_run.observer,
                 )
                 provider = agent_reviewer
                 max_reviews = 1 if llm_max_reviews is None else llm_max_reviews
@@ -232,36 +296,56 @@ def backtest(
             if reviewer is not None
             else None
         )
-    except (CodexError, MiniMaxError, ValueError) as error:
+    except KeyboardInterrupt:
+        dashboard_run.finish("stopped")
+        dashboard_run.close()
+        raise typer.Exit(code=130) from None
+    except (CodexError, DashboardError, MiniMaxError, ValueError) as error:
+        dashboard_run.finish("failed")
+        dashboard_run.close()
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from None
+    except Exception:
+        dashboard_run.finish("failed")
+        dashboard_run.close()
+        raise
     finally:
         if client is not None:
             client.close()
-    benchmark = buy_and_hold(frames["SPY"], settings.paper.initial_cash)  # type: ignore[arg-type]
-    runs = {"rules_only": rules_result.to_dict(), "spy_buy_hold": benchmark.to_dict()}
-    if llm_result is not None:
-        runs["llm"] = llm_result.to_dict()
-    note = "Paper simulation only."
-    if isinstance(reviewer, _ProgressReviewer) and reviewer.truncated_calls:
-        note = (
-            "LLM smoke run truncated: only the first "
-            f"{reviewer.real_calls} reviews used {reviewer.provider_name}; remaining reviews used "
-            "local rules-only replies."
-        )
-    if (
-        llm_result is not None
-        and not (isinstance(reviewer, _ProgressReviewer) and reviewer.truncated_calls)
-        and llm_result.metrics()["total_return"] <= rules_result.metrics()["total_return"]
-    ):
-        note = "LLM run shows no proven gain over rules-only after costs."
-    payload: dict[str, object] = {"runs": runs, "note": note}
-    if agent_reviewer is not None and agent_reviewer.traces:
-        payload["agent_traces"] = [
-            trace.model_dump(mode="json") for trace in agent_reviewer.traces
-        ]
-    _write_json(output, payload)
-    typer.echo(str(output))
+    try:
+        benchmark = buy_and_hold(frames["SPY"], settings.paper.initial_cash)
+        runs = {"rules_only": rules_result.to_dict(), "spy_buy_hold": benchmark.to_dict()}
+        if llm_result is not None:
+            runs["llm"] = llm_result.to_dict()
+        note = "Paper simulation only."
+        if isinstance(reviewer, _ProgressReviewer) and reviewer.truncated_calls:
+            note = (
+                "LLM smoke run truncated: only the first "
+                f"{reviewer.real_calls} reviews used {reviewer.provider_name}; remaining reviews "
+                "used local rules-only replies."
+            )
+        if (
+            llm_result is not None
+            and not (isinstance(reviewer, _ProgressReviewer) and reviewer.truncated_calls)
+            and llm_result.metrics()["total_return"] <= rules_result.metrics()["total_return"]
+        ):
+            note = "LLM run shows no proven gain over rules-only after costs."
+        payload: dict[str, object] = {"runs": runs, "note": note}
+        if agent_reviewer is not None and agent_reviewer.traces:
+            payload["agent_traces"] = [
+                trace.model_dump(mode="json") for trace in agent_reviewer.traces
+            ]
+        _write_json(output, payload)
+        typer.echo(str(output))
+        dashboard_run.finish("completed")
+    except KeyboardInterrupt:
+        dashboard_run.finish("stopped")
+        raise typer.Exit(code=130) from None
+    except Exception:
+        dashboard_run.finish("failed")
+        raise
+    finally:
+        dashboard_run.close()
 
 
 @agents_app.command("analyze")
@@ -279,9 +363,14 @@ def agents_analyze(
         LLMProvider,
         typer.Option(help="Provider: minimax requires an API key; codex uses local login."),
     ] = LLMProvider.MINIMAX,
+    dashboard: Annotated[
+        bool,
+        typer.Option(help="Open a local real-time TradingAgents decision dashboard."),
+    ] = False,
 ) -> None:
     """Analyze one eligible ticker once; never places an order."""
     client = None
+    dashboard_run = _DashboardRun(dashboard)
     try:
         settings = load_settings(config)
         point_in_time = as_of.date()
@@ -289,6 +378,12 @@ def agents_analyze(
         reject_future_context(external_context, ticker, point_in_time)
         prepared = prepare_analysis(
             _frames(data_root, settings.universe), settings, ticker, point_in_time
+        )
+        dashboard_run.start()
+        dashboard_run.prepare(
+            prepared.ticker,
+            prepared.as_of.isoformat(),
+            "Codex" if llm_provider is LLMProvider.CODEX else "MiniMax",
         )
         if not prepared.eligible:
             _write_json(
@@ -303,6 +398,7 @@ def agents_analyze(
                 },
             )
             typer.echo(str(output))
+            dashboard_run.finish("completed", reason=prepared.reason)
             return
         provider, client, provider_name = _open_provider(settings, llm_provider)
         reviewer = TradingAgentsReviewer(
@@ -310,6 +406,7 @@ def agents_analyze(
             provider_name=provider_name,
             external_context=external_context,
             on_progress=_agent_progress,
+            on_event=dashboard_run.observer,
         )
         assert prepared.messages is not None
         reviewer.complete(prepared.messages)
@@ -327,12 +424,21 @@ def agents_analyze(
             },
         )
         typer.echo(str(output))
-    except (CodexError, MiniMaxError, ValueError) as error:
+        dashboard_run.finish("completed")
+    except KeyboardInterrupt:
+        dashboard_run.finish("stopped")
+        raise typer.Exit(code=130) from None
+    except (CodexError, DashboardError, MiniMaxError, ValueError) as error:
+        dashboard_run.finish("failed")
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from None
+    except Exception:
+        dashboard_run.finish("failed")
+        raise
     finally:
         if client is not None:
             client.close()
+        dashboard_run.close()
 
 
 @paper_app.command("init")
