@@ -7,6 +7,38 @@
 > **免责声明：** 本项目仅用于研究和纸面模拟，不构成投资建议。项目没有实盘券商接口，
 > 不能发送真实订单。历史模拟结果不代表未来收益。
 
+## 本地实验网站
+
+通过页面选择模式、参数并观察后台过程，可以启动统一实验平台：
+
+```bash
+quant-trader web \
+  --config configs/default.yaml \
+  --data-root data \
+  --output-root web-runs
+```
+
+命令会自动打开浏览器；如果没有自动打开，复制终端打印的完整地址。地址带有随机访问
+令牌，并且服务只监听 `127.0.0.1`，不要转发到公网。需要指定端口或禁止自动打开时，可
+添加 `--port 8080 --no-open-browser`。
+
+页面支持规则基线、TradingAgents、FinMem、QuantaAlpha 和 Alpha Arena。前三类 LLM
+实验可选择本地 Codex 或国内 MiniMax M3；Alpha Arena 可以选择已经完成的实验进行横向
+比较。提交后，页面每秒刷新任务状态：“中间过程监控”显示排队、进程、Agent/模型阶段和
+CLI 日志；“实验效果”显示收益、回撤、候选因子或排行榜，并保留原始 JSON 供核查。
+
+关闭网页不会中止后台任务，停止启动命令则会终止仍在运行的子进程。运行记录保存在
+`web-runs/<任务 ID>/`。MiniMax Key 仍只从启动网站的终端环境读取，网页没有 Key 输入框，
+也不会把 Key 写入日志或实验文件：
+
+```bash
+export MINIMAX_API_KEY='你的 MiniMax API Key'
+quant-trader web
+```
+
+Codex 模式复用本机 Codex CLI 登录状态。平台只允许固定的研究命令和枚举参数，不能提交
+任意命令、路径或实盘交易请求。
+
 ## 安装与快速开始
 
 需要 Python 3.12 或更高版本。

@@ -34,6 +34,7 @@ from quant_trader.strategies.v2_multi_agent import (
     prepare_analysis,
     reject_future_context,
 )
+from quant_trader.web import WebJobManager, WebPlatformServer
 
 app = typer.Typer(help="Safe US-equity research and paper-trading tools (never live trading).")
 data_app = typer.Typer(help="Manage the validated local market-data cache.")
@@ -674,3 +675,29 @@ def report(
     output.parent.mkdir(parents=True, exist_ok=True)
     write_report(run_json, output)
     typer.echo(str(output))
+
+
+@app.command("web")
+def web_platform(
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = Path(
+        "configs/default.yaml"
+    ),
+    data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)] = Path("data"),
+    output_root: Annotated[Path, typer.Option()] = Path("web-runs"),
+    port: Annotated[int, typer.Option(min=0, max=65_535)] = 8000,
+    workers: Annotated[int, typer.Option(min=1, max=4)] = 2,
+    open_browser: Annotated[bool, typer.Option()] = True,
+) -> None:
+    """Open the local experiment website (research and paper simulation only)."""
+    manager = WebJobManager(
+        project_root=Path.cwd(),
+        config=config,
+        data_root=data_root,
+        output_root=output_root,
+        workers=workers,
+    )
+    server = WebPlatformServer(manager, port=port)
+    try:
+        server.serve(open_browser=open_browser)
+    except KeyboardInterrupt:
+        typer.echo("Web platform stopped.", err=True)
