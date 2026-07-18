@@ -16,6 +16,7 @@ from quant_trader.strategies.v2_multi_agent.models import (
     RoleName,
 )
 from quant_trader.strategies.v2_multi_agent.orchestrator import TradingAgentsReviewer
+from quant_trader.strategies.v2_multi_agent.prompts import render_report_prompt
 
 
 def _messages() -> tuple[ChatMessage, ...]:
@@ -36,6 +37,12 @@ def _messages() -> tuple[ChatMessage, ...]:
     return render_review_prompt(
         candidate, feature, cash_weight=1, current_weight=0, drawdown=0
     )
+
+
+def test_role_prompt_requests_simplified_chinese_content() -> None:
+    messages = render_report_prompt(RoleName.MARKET, {"request": "data"})
+
+    assert "Simplified Chinese" in messages[0].content
 
 
 def _report(role: RoleName, stance: str = "neutral") -> str:

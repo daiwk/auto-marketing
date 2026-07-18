@@ -138,4 +138,4 @@ def test_failed_role_emits_sanitized_failure_before_completion() -> None:
         AgentEventKind.WORKFLOW_COMPLETED,
     ]
     assert events[-2].report is not None
-    assert events[-2].report.summary == "This role did not produce a valid bounded response."
+    assert events[-2].report.summary == "该角色未能生成有效且满足边界要求的回复。"

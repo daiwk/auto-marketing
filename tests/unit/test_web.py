@@ -168,4 +168,7 @@ def test_web_page_contains_agent_board_and_equity_chart() -> None:
     assert 'id="agentRoles"' in WEB_HTML
     assert "market_analyst:'市场分析师'" in WEB_HTML
     assert 'id="equityChart"' in WEB_HTML
+    assert 'id="chartTooltip"' in WEB_HTML
     assert "agent_events" in WEB_HTML
+    assert "rules_only:'规则策略'" in WEB_HTML
+    assert "repeating-linear-gradient" in WEB_HTML
