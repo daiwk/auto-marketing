@@ -52,30 +52,30 @@ const roleLabels={market_analyst:'市场分析',sentiment_analyst:'情绪分析'
 fundamentals_analyst:'基本面分析',bull_researcher:'多方研究员',bear_researcher:'空方研究员',
 research_manager:'研究经理',trader:'交易员',aggressive_risk_analyst:'激进风险',
 neutral_risk_analyst:'中性风险',conservative_risk_analyst:'保守风险',portfolio_manager:'组合经理'};
-const order=Object.keys(roleLabels);let selected=null;
+const order=Object.keys(roleLabels);let selected=null;let selectedManually=false;let workflowKey=null;
 function el(tag,text,cls){const node=document.createElement(tag);if(text!==undefined)node.textContent=String(text);
 if(cls)node.className=cls;return node}
 function fillList(root,title,items){if(!items||!items.length)return;root.append(el('b',title));const list=el('ul',undefined,'list');
 items.forEach(item=>list.append(el('li',item)));root.append(list)}
-function showDetail(role){selected=role;const workflow=window.currentWorkflow;if(!workflow)return;
+function showDetail(role,manual=false){selected=role;if(manual)selectedManually=true;const workflow=window.currentWorkflow;if(!workflow)return;
 const item=workflow.roles[role];const root=document.getElementById('detail');root.replaceChildren();
+document.querySelectorAll('.role').forEach(button=>button.classList.toggle('selected',button.dataset.role===role));
 root.append(el('h2',roleLabels[role]));const chips=el('div',undefined,'chips');chips.append(el('span',item.status,'chip'));
 if(item.report){chips.append(el('span',item.report.stance,'chip'));chips.append(el('span',Math.round(item.report.confidence*100)+'% 信心','chip'))}
 root.append(chips);if(!item.report){root.append(el('p',item.status==='running'?'正在生成结构化结论...':'尚无报告','empty'));return}
 root.append(el('p',item.report.summary));fillList(root,'依据',item.report.evidence);fillList(root,'风险',item.report.risks);
-fillList(root,'输入异常',item.report.input_anomalies);document.querySelectorAll('.role').forEach(button=>
-button.classList.toggle('selected',button.dataset.role===role))}
+fillList(root,'输入异常',item.report.input_anomalies)}
 function decision(rootId,value){const root=document.getElementById(rootId);root.replaceChildren();if(!value){root.append(el('p','等待中','empty'));return}
 root.append(el('h3',(value.action||'')+' · 权重倍数 '+Number(value.weight_multiplier).toFixed(2)));
 root.append(el('p',value.thesis));fillList(root,'风险',value.risks)}
 function render(data){const workflow=data.workflow;document.getElementById('status').textContent=data.command_status+' · 已完成 '+data.workflow_count+' 个工作流';
-if(!workflow){if(data.reason)document.getElementById('activity').textContent=data.reason;return}window.currentWorkflow=workflow;document.getElementById('title').textContent=workflow.ticker+' · '+workflow.as_of;
+if(!workflow){if(data.reason)document.getElementById('activity').textContent=data.reason;return}const nextKey=workflow.ticker+'|'+workflow.as_of+'|'+data.workflow_count;if(nextKey!==workflowKey){workflowKey=nextKey;selected=null;selectedManually=false}window.currentWorkflow=workflow;document.getElementById('title').textContent=workflow.ticker+' · '+workflow.as_of;
 document.getElementById('meta').textContent=workflow.provider+' · '+workflow.status;const root=document.getElementById('roles');root.replaceChildren();
 let done=0;order.forEach(role=>{const item=workflow.roles[role];const button=el('button',undefined,'role '+item.status);button.dataset.role=role;
 button.append(el('div',roleLabels[role],'role-name'));let note=item.status;if(item.report)note=item.report.stance+' · '+Math.round(item.report.confidence*100)+'%';
-button.append(el('div',note,'role-note'));button.addEventListener('click',()=>showDetail(role));root.append(button);if(['completed','skipped','failed'].includes(item.status))done++});
+button.append(el('div',note,'role-note'));button.addEventListener('click',()=>showDetail(role,true));root.append(button);if(['completed','skipped','failed'].includes(item.status))done++});
 document.getElementById('progress').style.width=(done/order.length*100)+'%';const active=workflow.active_role;
-if(!selected||active)showDetail(active||selected||order[0]);document.getElementById('activity').textContent=active?'正在运行：'+roleLabels[active]:workflow.status;
+if(!selectedManually&&active)showDetail(active);else if(!selected)showDetail(active||order[0]);document.getElementById('activity').textContent=active?'正在运行：'+roleLabels[active]:workflow.status;
 decision('proposal',workflow.proposal);decision('final',workflow.final_review)}
 async function poll(){try{const response=await fetch('state',{cache:'no-store'});if(response.ok)render(await response.json())}catch(error){
 document.getElementById('activity').textContent='命令已结束或 Dashboard 已断开；保留最后状态。'}finally{setTimeout(poll,500)}}poll();

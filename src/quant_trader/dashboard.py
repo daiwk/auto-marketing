@@ -19,8 +19,10 @@ _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
         "default-src 'none'; script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; connect-src 'self'"
+        "style-src 'self' 'unsafe-inline'; connect-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'"
     ),
+    "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
 }
 
@@ -58,6 +60,27 @@ class DashboardState:
             self._project(event)
             self._advance()
 
+    def prepare(self, ticker: str, as_of: str, provider: str) -> int:
+        values = (ticker, as_of, provider)
+        if any(
+            not isinstance(value, str) or not value.strip() or len(value) > 100
+            for value in values
+        ):
+            raise ValueError("dashboard preparation labels must be bounded strings")
+        with self._condition:
+            self._snapshot["workflow"] = {
+                "ticker": ticker,
+                "as_of": as_of,
+                "provider": provider,
+                "status": "preparing",
+                "active_role": None,
+                "failure_role": None,
+                "roles": _waiting_roles(),
+                "proposal": None,
+                "final_review": None,
+            }
+            return self._advance()
+
     def _project(self, event: AgentEvent) -> None:
         if event.kind is AgentEventKind.WORKFLOW_STARTED:
             self._snapshot["command_status"] = "running"
@@ -67,6 +90,7 @@ class DashboardState:
                 "provider": event.provider,
                 "status": "running",
                 "active_role": None,
+                "failure_role": None,
                 "roles": _waiting_roles(),
                 "proposal": None,
                 "final_review": None,
@@ -93,6 +117,9 @@ class DashboardState:
             workflow["active_role"] = (
                 event.role.value if event.kind is AgentEventKind.ROLE_STARTED else None
             )
+            if event.kind is AgentEventKind.ROLE_FAILED:
+                workflow["status"] = "failed"
+                workflow["failure_role"] = event.role.value
         elif event.kind is AgentEventKind.TRADER_COMPLETED:
             workflow["proposal"] = event.proposal.model_dump(mode="json")  # type: ignore[union-attr]
             roles[RoleName.TRADER.value] = {"status": "completed", "report": None}
@@ -102,7 +129,8 @@ class DashboardState:
             )
             roles[RoleName.PORTFOLIO_MANAGER.value] = {"status": "completed", "report": None}
         elif event.kind is AgentEventKind.WORKFLOW_COMPLETED:
-            workflow["status"] = "completed"
+            if workflow["status"] != "failed":
+                workflow["status"] = "completed"
             workflow["active_role"] = None
             workflow["final_review"] = event.final_review.model_dump(  # type: ignore[union-attr]
                 mode="json"
@@ -189,11 +217,14 @@ class DashboardServer:
     def start(self) -> str:
         if self._server is not None:
             raise DashboardError("local dashboard is already running")
+        server: ThreadingHTTPServer | None = None
         try:
             server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
-        except OSError:
+        except (OSError, RuntimeError):
+            if server is not None:
+                server.server_close()
             raise DashboardError("local dashboard could not start") from None
         self._server, self._thread = server, thread
         port = server.server_address[1]
