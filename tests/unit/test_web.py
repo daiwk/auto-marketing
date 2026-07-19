@@ -225,6 +225,9 @@ def test_web_page_contains_agent_board_and_equity_chart() -> None:
     from quant_trader.web_template import WEB_HTML
 
     assert 'id="agentRoles"' in WEB_HTML
+    assert 'id="agentWorkflowTabs"' in WEB_HTML
+    assert "liveWorkflowGroups" in WEB_HTML
+    assert "第 '+(index+1)+' 次" in WEB_HTML
     assert "market_analyst:'市场分析师'" in WEB_HTML
     assert 'id="equityChart"' in WEB_HTML
     assert 'id="chartTooltip"' in WEB_HTML

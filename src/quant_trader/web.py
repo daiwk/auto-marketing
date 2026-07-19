@@ -29,7 +29,7 @@ from quant_trader.web_template import WEB_HTML
 
 _MAX_BODY_BYTES = 64 * 1024
 _MAX_EVENTS = 1_000
-_MAX_AGENT_EVENTS = 200
+_MAX_AGENT_EVENTS = 1_000
 _MAX_LINE_CHARS = 2_000
 _MAX_MODEL_LIST_BYTES = 64 * 1024
 _MODEL_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
