@@ -29,6 +29,8 @@ These instructions apply to the entire repository.
 
 - This project is for research, backtesting, and paper trading only. Do not add live broker or real
   money execution unless the user explicitly changes that scope.
+- The website is the only user-facing interface. Add user configuration and monitoring to the web
+  UI; keep backend runner commands hidden and do not document standalone CLI workflows.
 - Keep LLM calls bounded and visible. Prefer MiniMax China-region models or local Codex according to
   the existing provider interfaces.
 - Never persist API keys, raw credentials, or hidden model reasoning.

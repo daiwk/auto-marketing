@@ -69,6 +69,9 @@ def test_cli_help_exits_successfully() -> None:
     result = CliRunner().invoke(app, ["--help"])
 
     assert result.exit_code == 0
+    assert "web" in result.output
+    for hidden in ("backtest", "agents", "data", "experiment", "paper", "report"):
+        assert f"│ {hidden} " not in result.output
 
 
 @pytest.mark.parametrize("kind", ["finmem", "quanta-alpha", "alpha-arena"])
