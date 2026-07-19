@@ -30,6 +30,7 @@ from quant_trader.report import write_report
 from quant_trader.state import PaperState
 from quant_trader.strategies.v2_multi_agent import (
     AgentEvent,
+    AgentEventKind,
     TradingAgentsReviewer,
     load_external_context,
     prepare_analysis,
@@ -478,6 +479,10 @@ def backtest(
             observer(event)
         if agent_events is not None:
             _append_agent_event(agent_events, event)
+        if event.kind is AgentEventKind.ROLE_FAILED and event.report is not None:
+            detail = event.report.input_anomalies[-1]
+            role = event.role.value if event.role is not None else "unknown"
+            typer.echo(f"Agent {role} error: {detail}", err=True)
 
     try:
         dashboard_run.start()

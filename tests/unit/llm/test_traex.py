@@ -69,6 +69,29 @@ def test_traex_sanitizes_process_failures(
     assert secret not in str(error.value)
 
 
+def test_traex_exposes_bounded_sanitized_cli_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "secret-value"
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        kwargs["stderr"].write(
+            f"\x1b[31mModel unavailable; Authorization: Bearer {secret}\x1b[0m\n".encode()
+        )
+        return subprocess.CompletedProcess(args, 23)
+
+    monkeypatch.setattr("quant_trader.llm.traex.subprocess.run", run)
+    with pytest.raises(TraexError, match="code 23.*Model unavailable") as error:
+        TraexReviewer().complete((ChatMessage(role="user", content="private prompt"),))
+
+    assert secret not in str(error.value)
+    assert "[credential redacted]" in str(error.value)
+
+
+def test_forged_traex_error_cannot_claim_to_be_sanitized() -> None:
+    assert str(TraexError("secret provider response")) == "Trae X provider failed"
+
+
 @pytest.mark.parametrize(
     ("content", "message"),
     [
