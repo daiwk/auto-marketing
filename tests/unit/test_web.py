@@ -215,4 +215,6 @@ def test_web_page_contains_agent_board_and_equity_chart() -> None:
     assert "repeating-linear-gradient" in WEB_HTML
     assert '<option value="traex">本地 Trae X</option>' in WEB_HTML
     assert 'id="targetVolatility"' in WEB_HTML
+    assert 'id="targetVolatility" type="number" min="0.01" max="100" step="any"' in WEB_HTML
+    assert 'id="initialCash" type="number" min="1" step="any"' in WEB_HTML
     assert "parameters:parameters()" in WEB_HTML
