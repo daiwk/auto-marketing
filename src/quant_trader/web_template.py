@@ -45,18 +45,18 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
         <details class="parameters" open><summary>回测与算法参数</summary>
           <div class="parameter-grid">
             <div class="wide"><label for="universe">股票池（英文逗号分隔）</label><input id="universe" autocomplete="off"></div>
-            <div><label for="initialCash">初始资金</label><input id="initialCash" type="number" min="1" step="1000"></div>
+            <div><label for="initialCash">初始资金</label><input id="initialCash" type="number" min="1" step="any"></div>
             <div><label for="maxCandidates">最多候选数</label><input id="maxCandidates" type="number" min="1" max="100" step="1"></div>
-            <div class="wide"><label for="minLiquidity">最低日均成交额（美元）</label><input id="minLiquidity" type="number" min="0" step="1000000"></div>
-            <div><label for="targetVolatility">目标波动率（%）</label><input id="targetVolatility" type="number" min="0.01" max="100" step="0.1"></div>
-            <div><label for="maxPosition">单股仓位上限（%）</label><input id="maxPosition" type="number" min="0.01" max="100" step="0.1"></div>
-            <div><label for="maxGross">总仓位上限（%）</label><input id="maxGross" type="number" min="0.01" max="100" step="0.1"></div>
-            <div><label for="minCash">最低现金比例（%）</label><input id="minCash" type="number" min="0" max="100" step="0.1"></div>
-            <div><label for="reduceDrawdown">触发减仓回撤（%）</label><input id="reduceDrawdown" type="number" min="0.01" max="100" step="0.1"></div>
-            <div><label for="haltDrawdown">停止交易回撤（%）</label><input id="haltDrawdown" type="number" min="0.01" max="100" step="0.1"></div>
-            <div><label for="atrMultiple">ATR 止损倍数</label><input id="atrMultiple" type="number" min="0.01" step="0.1"></div>
-            <div><label for="slippageBps">滑点（基点）</label><input id="slippageBps" type="number" min="0" step="0.1"></div>
-            <div><label for="commissionBps">手续费（基点）</label><input id="commissionBps" type="number" min="0" step="0.1"></div>
+            <div class="wide"><label for="minLiquidity">最低日均成交额（美元）</label><input id="minLiquidity" type="number" min="0" step="any"></div>
+            <div><label for="targetVolatility">目标波动率（%）</label><input id="targetVolatility" type="number" min="0.01" max="100" step="any"></div>
+            <div><label for="maxPosition">单股仓位上限（%）</label><input id="maxPosition" type="number" min="0.01" max="100" step="any"></div>
+            <div><label for="maxGross">总仓位上限（%）</label><input id="maxGross" type="number" min="0.01" max="100" step="any"></div>
+            <div><label for="minCash">最低现金比例（%）</label><input id="minCash" type="number" min="0" max="100" step="any"></div>
+            <div><label for="reduceDrawdown">触发减仓回撤（%）</label><input id="reduceDrawdown" type="number" min="0.01" max="100" step="any"></div>
+            <div><label for="haltDrawdown">停止交易回撤（%）</label><input id="haltDrawdown" type="number" min="0.01" max="100" step="any"></div>
+            <div><label for="atrMultiple">ATR 止损倍数</label><input id="atrMultiple" type="number" min="0.01" step="any"></div>
+            <div><label for="slippageBps">滑点（基点）</label><input id="slippageBps" type="number" min="0" step="any"></div>
+            <div><label for="commissionBps">手续费（基点）</label><input id="commissionBps" type="number" min="0" step="any"></div>
           </div>
           <p class="hint">这些参数会写入本次任务的独立配置，不影响默认配置文件。</p>
         </details>
