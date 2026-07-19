@@ -38,16 +38,16 @@ from quant_trader.strategies.v2_multi_agent import (
 )
 from quant_trader.web import WebJobManager, WebPlatformServer
 
-app = typer.Typer(help="Safe US-equity research and paper-trading tools (never live trading).")
+app = typer.Typer(help="Local web UI for safe US-equity research and paper simulation.")
 data_app = typer.Typer(help="Manage the validated local market-data cache.")
 paper_app = typer.Typer(help="Run one confirmed, paper-only cycle.")
 agents_app = typer.Typer(help="Run bounded TradingAgents-style paper analysis.")
 experiment_app = typer.Typer(help="Run reproducible paper strategy experiments.")
 experiment_run_app = typer.Typer(help="Run one paper experiment.")
-app.add_typer(data_app, name="data")
-app.add_typer(paper_app, name="paper")
-app.add_typer(agents_app, name="agents")
-app.add_typer(experiment_app, name="experiment")
+app.add_typer(data_app, name="data", hidden=True)
+app.add_typer(paper_app, name="paper", hidden=True)
+app.add_typer(agents_app, name="agents", hidden=True)
+app.add_typer(experiment_app, name="experiment", hidden=True)
 experiment_app.add_typer(experiment_run_app, name="run")
 
 
@@ -488,7 +488,7 @@ def experiment_alpha_arena(
     )
 
 
-@app.command()
+@app.command(hidden=True)
 def backtest(
     config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
     data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
@@ -835,7 +835,7 @@ def paper_run(
     typer.echo(json.dumps({"processed": identifiers}))
 
 
-@app.command()
+@app.command(hidden=True)
 def report(
     run_json: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
     output: Annotated[Path, typer.Option()],
