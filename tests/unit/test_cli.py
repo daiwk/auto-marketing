@@ -619,6 +619,45 @@ def test_codex_backtest_honors_explicit_review_limit(
     assert FakeCodexReviewer.calls == 1
 
 
+def test_traex_backtest_uses_local_login_and_bounded_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeTraexReviewer:
+        checked = False
+        calls = 0
+
+        def check_available(self) -> None:
+            type(self).checked = True
+
+        def complete(self, messages: tuple[ChatMessage, ...]) -> str:
+            type(self).calls += 1
+            return MaintainReviewer().complete(messages)
+
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.setattr("quant_trader.cli.TraexReviewer", FakeTraexReviewer)
+    output = tmp_path / "traex.json"
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "--config",
+            "configs/default.yaml",
+            "--data-root",
+            "data",
+            "--output",
+            str(output),
+            "--use-llm",
+            "--llm-provider",
+            "traex",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert FakeTraexReviewer.checked
+    assert FakeTraexReviewer.calls == 3
+    assert "first 3 reviews used Trae X" in json.loads(output.read_text())["note"]
+
+
 def test_minimax_provider_still_requires_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

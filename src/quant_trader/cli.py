@@ -24,6 +24,7 @@ from quant_trader.experiments.run import run_alpha_arena, run_finmem, run_quanta
 from quant_trader.llm.base import LLMReviewer, MessageInput
 from quant_trader.llm.codex import CodexError, CodexReviewer
 from quant_trader.llm.minimax import MiniMaxError, MiniMaxReviewer
+from quant_trader.llm.traex import TraexError, TraexReviewer
 from quant_trader.paper import run_once
 from quant_trader.report import write_report
 from quant_trader.state import PaperState
@@ -57,6 +58,7 @@ class MarketSource(StrEnum):
 class LLMProvider(StrEnum):
     MINIMAX = "minimax"
     CODEX = "codex"
+    TRAEX = "traex"
 
 
 class LLMWorkflow(StrEnum):
@@ -97,6 +99,10 @@ def _open_provider(
         codex = CodexReviewer()
         codex.check_available()
         return codex, None, "Codex"
+    if provider is LLMProvider.TRAEX:
+        traex = TraexReviewer()
+        traex.check_available()
+        return traex, None, "Trae X"
     key = settings.llm.api_key.get_secret_value()
     if not key:
         raise typer.BadParameter("MiniMax reviews require MINIMAX_API_KEY")
@@ -275,7 +281,11 @@ def _run_experiment_command(
             provider, client, provider_name = _open_provider(
                 settings, llm_provider, max_retries=0
             )
-            model = settings.llm.model if llm_provider is LLMProvider.MINIMAX else "codex"
+            model = (
+                settings.llm.model
+                if llm_provider is LLMProvider.MINIMAX
+                else llm_provider.value
+            )
         prepared = False
 
         def update(stage: str, status: str, payload: dict[str, object]) -> None:
@@ -333,6 +343,7 @@ def _run_experiment_command(
         DashboardError,
         DataValidationError,
         MiniMaxError,
+        TraexError,
         OSError,
         ValueError,
     ) as error:
@@ -491,7 +502,8 @@ def backtest(
             else:
                 max_reviews = (
                     3
-                    if llm_provider is LLMProvider.CODEX and llm_max_reviews is None
+                    if llm_provider in {LLMProvider.CODEX, LLMProvider.TRAEX}
+                    and llm_max_reviews is None
                     else llm_max_reviews
                 )
             reviewer = _ProgressReviewer(
@@ -515,7 +527,7 @@ def backtest(
         dashboard_run.finish("stopped")
         dashboard_run.close()
         raise typer.Exit(code=130) from None
-    except (CodexError, DashboardError, MiniMaxError, ValueError) as error:
+    except (CodexError, DashboardError, MiniMaxError, TraexError, ValueError) as error:
         dashboard_run.finish("failed")
         dashboard_run.close()
         typer.echo(f"Error: {error}", err=True)
@@ -576,7 +588,9 @@ def agents_analyze(
     ] = None,
     llm_provider: Annotated[
         LLMProvider,
-        typer.Option(help="Provider: minimax requires an API key; codex uses local login."),
+        typer.Option(
+            help="Provider: minimax requires an API key; codex/traex use local login."
+        ),
     ] = LLMProvider.MINIMAX,
     dashboard: Annotated[
         bool,
@@ -598,7 +612,9 @@ def agents_analyze(
         dashboard_run.prepare(
             prepared.ticker,
             prepared.as_of.isoformat(),
-            "Codex" if llm_provider is LLMProvider.CODEX else "MiniMax",
+            {LLMProvider.CODEX: "Codex", LLMProvider.TRAEX: "Trae X"}.get(
+                llm_provider, "MiniMax"
+            ),
         )
         if not prepared.eligible:
             _write_json(
@@ -643,7 +659,7 @@ def agents_analyze(
     except KeyboardInterrupt:
         dashboard_run.finish("stopped")
         raise typer.Exit(code=130) from None
-    except (CodexError, DashboardError, MiniMaxError, ValueError) as error:
+    except (CodexError, DashboardError, MiniMaxError, TraexError, ValueError) as error:
         dashboard_run.finish("failed")
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from None
