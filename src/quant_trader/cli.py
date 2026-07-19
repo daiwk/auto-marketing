@@ -101,7 +101,7 @@ def _open_provider(
         codex.check_available()
         return codex, None, "Codex"
     if provider is LLMProvider.TRAEX:
-        traex = TraexReviewer()
+        traex = TraexReviewer(model=settings.llm.traex_model)
         traex.check_available()
         return traex, None, "Trae X"
     key = settings.llm.api_key.get_secret_value()

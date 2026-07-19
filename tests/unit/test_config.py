@@ -177,3 +177,10 @@ def test_llm_settings_rejects_more_than_five_retries() -> None:
     assert LLMSettings(max_retries=5).max_retries == 5
     with pytest.raises(ValidationError):
         LLMSettings(max_retries=6)
+
+
+def test_traex_model_defaults_and_validates_cli_label() -> None:
+    assert LLMSettings().traex_model == "gpt-5.5"
+    assert LLMSettings(traex_model="qwen-3.6-plus").traex_model == "qwen-3.6-plus"
+    with pytest.raises(ValidationError):
+        LLMSettings(traex_model="bad model")

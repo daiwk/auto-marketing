@@ -6,7 +6,7 @@ import os
 import re
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import yaml
 from pydantic import (
@@ -15,6 +15,7 @@ from pydantic import (
     Field,
     HttpUrl,
     SecretStr,
+    StringConstraints,
     TypeAdapter,
     ValidationError,
     field_validator,
@@ -63,6 +64,17 @@ class ExecutionSettings(_StrictModel):
     commission_bps: StrictNumber = Field(default=1, ge=0)
 
 
+TraexModel = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=False,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    ),
+]
+
+
 class LLMSettings(_StrictModel):
     api_key: SecretStr = Field(default_factory=lambda: SecretStr(""))
     base_url: str = "https://api.minimaxi.com/v1"
@@ -70,6 +82,7 @@ class LLMSettings(_StrictModel):
     prompt_version: str = "v1"
     timeout_seconds: StrictNumber = Field(default=30, gt=0)
     max_retries: StrictInteger = Field(default=2, ge=0, le=5)
+    traex_model: TraexModel = "gpt-5.5"
 
     @field_validator("base_url", mode="before")
     @classmethod

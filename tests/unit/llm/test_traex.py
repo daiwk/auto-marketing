@@ -32,9 +32,11 @@ def test_traex_uses_logged_in_read_only_ephemeral_exec(
 
     assert calls[0][0] == ["traex", "login", "status"]
     args, kwargs = calls[1]
-    assert args[:7] == [
+    assert args[:9] == [
         "traex",
         "exec",
+        "--model",
+        "gpt-5.5",
         "--ephemeral",
         "--sandbox",
         "read-only",
@@ -90,6 +92,24 @@ def test_traex_exposes_bounded_sanitized_cli_diagnostic(
 
 def test_forged_traex_error_cannot_claim_to_be_sanitized() -> None:
     assert str(TraexError("secret provider response")) == "Trae X provider failed"
+
+
+def test_traex_model_is_explicit_and_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        calls.append(args)
+        _write_response(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr("quant_trader.llm.traex.subprocess.run", run)
+    TraexReviewer(model="gpt-5.6-terra").complete(
+        (ChatMessage(role="user", content="review"),)
+    )
+
+    assert calls[0][calls[0].index("--model") + 1] == "gpt-5.6-terra"
+    with pytest.raises(ValueError, match="model"):
+        TraexReviewer(model=" gpt-5.5")
 
 
 @pytest.mark.parametrize(

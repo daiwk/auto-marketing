@@ -625,6 +625,10 @@ def test_traex_backtest_uses_local_login_and_bounded_default(
     class FakeTraexReviewer:
         checked = False
         calls = 0
+        model = ""
+
+        def __init__(self, *, model: str) -> None:
+            type(self).model = model
 
         def check_available(self) -> None:
             type(self).checked = True
@@ -654,6 +658,7 @@ def test_traex_backtest_uses_local_login_and_bounded_default(
 
     assert result.exit_code == 0, result.output
     assert FakeTraexReviewer.checked
+    assert FakeTraexReviewer.model == "gpt-5.5"
     assert FakeTraexReviewer.calls == 3
     assert "first 3 reviews used Trae X" in json.loads(output.read_text())["note"]
 

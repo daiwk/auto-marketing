@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import secrets
 import subprocess
 import sys
@@ -15,13 +16,14 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from tempfile import TemporaryFile
 from typing import Any, Protocol
 from uuid import uuid4
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from quant_trader.config import Settings, load_settings
+from quant_trader.config import Settings, TraexModel, load_settings
 from quant_trader.validation import StrictInteger, StrictNumber, USEquityTicker
 from quant_trader.web_template import WEB_HTML
 
@@ -29,6 +31,8 @@ _MAX_BODY_BYTES = 64 * 1024
 _MAX_EVENTS = 1_000
 _MAX_AGENT_EVENTS = 200
 _MAX_LINE_CHARS = 2_000
+_MAX_MODEL_LIST_BYTES = 64 * 1024
+_MODEL_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
@@ -74,6 +78,7 @@ class WebParameters(BaseModel):
     atr_multiple: StrictNumber = Field(gt=0)
     slippage_bps: StrictNumber = Field(ge=0, le=10_000)
     commission_bps: StrictNumber = Field(ge=0, le=10_000)
+    traex_model: TraexModel = "gpt-5.5"
 
     @model_validator(mode="after")
     def validate_cross_fields(self) -> WebParameters:
@@ -128,6 +133,7 @@ class ProcessLike(Protocol):
 
 
 ProcessFactory = Callable[[Sequence[str], Path], ProcessLike]
+TraexModelSource = Callable[[], tuple[str, ...]]
 
 
 def _default_process(command: Sequence[str], cwd: Path) -> ProcessLike:
@@ -142,6 +148,36 @@ def _default_process(command: Sequence[str], cwd: Path) -> ProcessLike:
         errors="replace",
         bufsize=1,
         shell=False,
+    )
+
+
+def _load_traex_models() -> tuple[str, ...]:
+    """Read the installed CLI's bounded model list without executing a model call."""
+    with TemporaryFile() as output:
+        try:
+            completed = subprocess.run(  # noqa: S603 - fixed local CLI command
+                ["traex", "models"],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ()
+        if completed.returncode != 0:
+            return ()
+        output.seek(0)
+        raw = output.read(_MAX_MODEL_LIST_BYTES + 1)
+    if len(raw) > _MAX_MODEL_LIST_BYTES:
+        return ()
+    labels = raw.decode("utf-8", errors="ignore").splitlines()
+    return tuple(
+        dict.fromkeys(
+            label.strip()
+            for label in labels
+            if _MODEL_LABEL.fullmatch(label.strip())
+        )
     )
 
 
@@ -167,6 +203,7 @@ class WebJobManager:
         data_root: Path,
         output_root: Path,
         process_factory: ProcessFactory = _default_process,
+        traex_model_source: TraexModelSource = _load_traex_models,
         workers: int = 2,
     ) -> None:
         if workers < 1 or workers > 4:
@@ -179,6 +216,9 @@ class WebJobManager:
             raise ValueError("config and data root must exist")
         self._settings = load_settings(self.config)
         self._default_parameters = self._parameters_from_settings(self._settings)
+        self._traex_models = tuple(
+            dict.fromkeys((self._settings.llm.traex_model, *traex_model_source()))
+        )
         self.output_root.mkdir(parents=True, exist_ok=True)
         self._process_factory = process_factory
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="quant-web")
@@ -203,11 +243,15 @@ class WebJobManager:
             atr_multiple=settings.risk.atr_multiple,
             slippage_bps=settings.execution.slippage_bps,
             commission_bps=settings.execution.commission_bps,
+            traex_model=settings.llm.traex_model,
         )
 
     def defaults(self) -> dict[str, object]:
         """Return safe frontend defaults without credentials or server paths."""
         return self._default_parameters.model_dump(mode="json")
+
+    def traex_models(self) -> list[str]:
+        return list(self._traex_models)
 
     def _write_run_config(self, run_dir: Path, parameters: WebParameters) -> Path:
         payload = {
@@ -230,7 +274,10 @@ class WebJobManager:
                 "slippage_bps": parameters.slippage_bps,
                 "commission_bps": parameters.commission_bps,
             },
-            "llm": self._settings.llm.model_dump(mode="json", exclude={"api_key"}),
+            "llm": {
+                **self._settings.llm.model_dump(mode="json", exclude={"api_key"}),
+                "traex_model": parameters.traex_model,
+            },
         }
         Settings.model_validate(payload)
         path = run_dir / "config.yaml"
@@ -254,10 +301,12 @@ class WebJobManager:
                     raise ValueError("Alpha Arena currently accepts FinMem or QuantaAlpha runs")
                 if not contestant.get("artifact_root"):
                     raise ValueError("contestant does not have a reusable artifact")
+            parameters = request.parameters or self._default_parameters
+            if parameters.traex_model not in self._traex_models:
+                raise ValueError("所选 Trae X 模型不在本机 traex models 列表中")
             run_id = uuid4().hex
             run_dir = self.output_root / run_id
             run_dir.mkdir(parents=True, exist_ok=False)
-            parameters = request.parameters or self._default_parameters
             run_config = self._write_run_config(run_dir, parameters)
             request = request.model_copy(update={"parameters": parameters})
             self._jobs[run_id] = {
@@ -607,7 +656,13 @@ class WebPlatformServer:
                     self._json(200, {"runs": manager.list_runs()})
                     return
                 if self.path == f"{prefix}api/config":
-                    self._json(200, {"parameters": manager.defaults()})
+                    self._json(
+                        200,
+                        {
+                            "parameters": manager.defaults(),
+                            "traex_models": manager.traex_models(),
+                        },
+                    )
                     return
                 run_prefix = f"{prefix}api/runs/"
                 if self.path.startswith(run_prefix):
