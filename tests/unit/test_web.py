@@ -15,6 +15,7 @@ from quant_trader.web import (
     WebParameters,
     WebPlatformServer,
     WebProvider,
+    WebReviewSchedule,
     WebRunRequest,
 )
 
@@ -152,10 +153,52 @@ def test_trading_agents_command_is_bounded(tmp_path: Path) -> None:
         command = commands[0]
         assert command[command.index("--llm-provider") + 1] == "codex"
         assert command[command.index("--llm-max-reviews") + 1] == "2"
+        assert command[command.index("--llm-review-schedule") + 1] == "evenly"
+        assert command[command.index("--start") + 1] == "2023-01-01"
+        assert command[command.index("--end") + 1] == "2026-01-01"
         assert "--agent-events" in command
         assert run["agent_events"][0]["role"] == "market_analyst"
     finally:
         manager.close()
+
+
+def test_trading_agents_command_accepts_custom_review_opportunities(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    manager = _manager(tmp_path, commands)
+    try:
+        run_id = manager.submit(
+            WebRunRequest(
+                mode=WebMode.TRADING_AGENTS,
+                provider=WebProvider.CODEX,
+                max_reviews=2,
+                review_schedule=WebReviewSchedule.CUSTOM,
+                review_indices=(1, 341),
+            )
+        )
+        run = manager.wait(run_id)
+        assert run is not None and run["status"] == "completed"
+        command = commands[0]
+        assert command[command.index("--llm-review-indices") + 1] == "1,341"
+    finally:
+        manager.close()
+
+
+def test_request_rejects_invalid_window_and_custom_review_count() -> None:
+    with pytest.raises(ValidationError, match="开始日期必须早于结束日期"):
+        WebRunRequest(
+            mode=WebMode.RULES,
+            provider=WebProvider.RULES,
+            start="2026-01-01",
+            end="2026-01-01",
+        )
+    with pytest.raises(ValidationError, match="数量等于审核次数"):
+        WebRunRequest(
+            mode=WebMode.TRADING_AGENTS,
+            provider=WebProvider.CODEX,
+            max_reviews=2,
+            review_schedule=WebReviewSchedule.CUSTOM,
+            review_indices=(1,),
+        )
 
 
 def test_run_parameters_create_isolated_safe_config(tmp_path: Path) -> None:
@@ -237,6 +280,11 @@ def test_web_page_contains_agent_board_and_equity_chart() -> None:
     assert '<option value="traex">本地 Trae X</option>' in WEB_HTML
     assert '<option value="gpt-5.5">gpt-5.5（默认）</option>' in WEB_HTML
     assert 'id="traexModelBox"' in WEB_HTML
+    assert 'id="startDate" type="date" value="2023-01-01"' in WEB_HTML
+    assert 'id="endDate" type="date" value="2026-01-01"' in WEB_HTML
+    assert 'id="reviewSchedule"' in WEB_HTML
+    assert 'id="reviewIndices"' in WEB_HTML
+    assert "review_schedule:schedule" in WEB_HTML
     assert "body.traex_models" in WEB_HTML
     assert 'id="targetVolatility"' in WEB_HTML
     assert 'id="targetVolatility" type="number" min="0.01" max="100" step="any"' in WEB_HTML

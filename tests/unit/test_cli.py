@@ -5,7 +5,14 @@ import pytest
 from typer.testing import CliRunner
 
 from quant_trader.backtest import MaintainReviewer
-from quant_trader.cli import _CountingReviewer, _ProgressReviewer, _RejectReviewer, app
+from quant_trader.cli import (
+    LLMReviewSchedule,
+    _CountingReviewer,
+    _ProgressReviewer,
+    _RejectReviewer,
+    _review_plan,
+    app,
+)
 from quant_trader.dashboard import DashboardError
 from quant_trader.data.validation import DataValidationError
 from quant_trader.llm.base import ChatMessage
@@ -538,6 +545,35 @@ def test_progress_reviewer_can_fail_closed_after_limit() -> None:
     assert fallback["action"] == "reject"
     assert fallback["weight_multiplier"] == 0
     assert reviewer.real_calls == 0
+
+
+def test_even_review_plan_spreads_reviews_across_all_opportunities() -> None:
+    assert _review_plan(341, 4, LLMReviewSchedule.EVENLY, None) == (1, 114, 228, 341)
+    assert _review_plan(341, 1, LLMReviewSchedule.EVENLY, None) == (171,)
+
+
+def test_custom_review_plan_validates_and_sorts_indices() -> None:
+    assert _review_plan(341, 4, LLMReviewSchedule.CUSTOM, "341, 1, 228, 114") == (
+        1,
+        114,
+        228,
+        341,
+    )
+    with pytest.raises(ValueError, match="between 1 and 341"):
+        _review_plan(341, 2, LLMReviewSchedule.CUSTOM, "1,342")
+
+
+def test_progress_reviewer_only_calls_scheduled_opportunities() -> None:
+    provider = _CountingReviewer()
+    reviewer = _ProgressReviewer(provider, max_reviews=2, provider_name="Codex")
+    reviewer.set_review_indices((2, 4))
+
+    for index in range(4):
+        reviewer.complete((ChatMessage(role="user", content=str(index)),))
+
+    assert provider.calls == 2
+    assert reviewer.real_calls == 2
+    assert reviewer.truncated_calls == 2
 
 
 def test_codex_backtest_needs_no_minimax_key_and_defaults_to_three_reviews(

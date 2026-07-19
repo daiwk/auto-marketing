@@ -67,6 +67,12 @@ class LLMWorkflow(StrEnum):
     TRADING_AGENTS = "trading-agents"
 
 
+class LLMReviewSchedule(StrEnum):
+    FIRST = "first"
+    EVENLY = "evenly"
+    CUSTOM = "custom"
+
+
 @data_app.command("sync")
 def data_sync(
     config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
@@ -88,9 +94,27 @@ def data_sync(
         raise typer.Exit(code=1) from None
 
 
-def _frames(data_root: Path, tickers: tuple[str, ...]) -> dict[str, pd.DataFrame]:
+def _frames(
+    data_root: Path,
+    tickers: tuple[str, ...],
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> dict[str, pd.DataFrame]:
+    if start is not None and end is not None and start >= end:
+        raise ValueError("start date must be before end date")
     cache = ParquetMarketCache(data_root)
-    return {ticker: cache.read(ticker) for ticker in tickers}
+    frames = {ticker: cache.read(ticker) for ticker in tickers}
+    if start is None and end is None:
+        return frames
+    filtered: dict[str, pd.DataFrame] = {}
+    for ticker, frame in frames.items():
+        selected = frame
+        if start is not None:
+            selected = selected.loc[selected.index >= pd.Timestamp(start)]
+        if end is not None:
+            selected = selected.loc[selected.index < pd.Timestamp(end)]
+        filtered[ticker] = selected
+    return filtered
 
 
 def _open_provider(
@@ -240,9 +264,24 @@ class _ProgressReviewer:
         self._reviewer = reviewer
         self._fallback = fallback or MaintainReviewer()
         self._max_reviews = max_reviews
+        self._review_indices: frozenset[int] | None = None
+
+    @property
+    def review_indices(self) -> tuple[int, ...] | None:
+        return (
+            tuple(sorted(self._review_indices))
+            if self._review_indices is not None
+            else None
+        )
+
+    def set_review_indices(self, indices: Sequence[int]) -> None:
+        self._review_indices = frozenset(indices)
 
     def complete(self, messages: tuple[MessageInput, ...]) -> str:
         self.calls += 1
+        if self._review_indices is not None and self.calls not in self._review_indices:
+            self.truncated_calls += 1
+            return self._fallback.complete(messages)
         if self._max_reviews is not None and self.real_calls >= self._max_reviews:
             self.truncated_calls += 1
             if self.truncated_calls == 1:
@@ -259,6 +298,38 @@ class _ProgressReviewer:
         return result
 
 
+def _review_plan(
+    total: int,
+    maximum: int | None,
+    schedule: LLMReviewSchedule,
+    custom: str | None,
+) -> tuple[int, ...] | None:
+    if maximum is None:
+        if schedule is not LLMReviewSchedule.FIRST or custom:
+            raise ValueError("a review schedule requires --llm-max-reviews")
+        return None
+    count = min(maximum, total)
+    if schedule is LLMReviewSchedule.CUSTOM:
+        try:
+            indices = tuple(int(item.strip()) for item in (custom or "").split(","))
+        except ValueError:
+            raise ValueError("custom review indices must be comma-separated integers") from None
+        if not indices or len(indices) != maximum or len(set(indices)) != len(indices):
+            raise ValueError("custom review indices must be unique and match max reviews")
+        if any(index < 1 or index > total for index in indices):
+            raise ValueError(f"custom review indices must be between 1 and {total}")
+        return tuple(sorted(indices))
+    if custom:
+        raise ValueError("--llm-review-indices requires --llm-review-schedule custom")
+    if count == 0:
+        return ()
+    if schedule is LLMReviewSchedule.FIRST:
+        return tuple(range(1, count + 1))
+    if count == 1:
+        return ((total + 1) // 2,)
+    return tuple(round(index * (total - 1) / (count - 1)) + 1 for index in range(count))
+
+
 def _run_experiment_command(
     kind: str,
     config: Path,
@@ -266,13 +337,15 @@ def _run_experiment_command(
     output_dir: Path,
     llm_provider: LLMProvider | None,
     dashboard: bool,
+    start: datetime | None = None,
+    end: datetime | None = None,
     contestant_runs: tuple[Path, ...] = (),
 ) -> None:
     client: MiniMaxReviewer | None = None
     dashboard_run = _DashboardRun(dashboard)
     try:
         settings = load_settings(config)
-        frames = _frames(data_root, settings.universe)
+        frames = _frames(data_root, settings.universe, start, end)
         dashboard_run.start()
         provider_name = "none"
         provider: LLMReviewer | None = None
@@ -364,10 +437,12 @@ def experiment_finmem(
     output_dir: Annotated[Path, typer.Option()],
     llm_provider: Annotated[LLMProvider, typer.Option()] = LLMProvider.MINIMAX,
     dashboard: Annotated[bool, typer.Option()] = False,
+    start: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    end: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
 ) -> None:
     """Run one-call, memory-aware paper backtest."""
     _run_experiment_command(
-        "finmem", config, data_root, output_dir, llm_provider, dashboard
+        "finmem", config, data_root, output_dir, llm_provider, dashboard, start, end
     )
 
 
@@ -378,10 +453,12 @@ def experiment_quanta_alpha(
     output_dir: Annotated[Path, typer.Option()],
     llm_provider: Annotated[LLMProvider, typer.Option()] = LLMProvider.MINIMAX,
     dashboard: Annotated[bool, typer.Option()] = False,
+    start: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    end: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
 ) -> None:
     """Mine a safe factor DSL with at most two provider calls."""
     _run_experiment_command(
-        "quanta-alpha", config, data_root, output_dir, llm_provider, dashboard
+        "quanta-alpha", config, data_root, output_dir, llm_provider, dashboard, start, end
     )
 
 
@@ -394,6 +471,8 @@ def experiment_alpha_arena(
         list[Path], typer.Option(exists=True, file_okay=False, help="Existing run directory.")
     ] = [],
     dashboard: Annotated[bool, typer.Option()] = False,
+    start: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    end: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
 ) -> None:
     """Compare existing artifacts without constructing an LLM provider."""
     _run_experiment_command(
@@ -403,6 +482,8 @@ def experiment_alpha_arena(
         output_dir,
         None,
         dashboard,
+        start,
+        end,
         tuple(contestant_run),
     )
 
@@ -412,6 +493,8 @@ def backtest(
     config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
     data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
     output: Annotated[Path, typer.Option()],
+    start: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    end: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
     use_llm: Annotated[
         bool, typer.Option(help="Use external LLM reviews (MiniMax by default).")
     ] = False,
@@ -436,10 +519,20 @@ def backtest(
         typer.Option(
             min=1,
             help=(
-                "Send only the first N reviews to the provider, then use local rules-only replies. "
-                "Useful for API smoke tests."
+                "Send only N selected reviews to the provider, then use local rules-only replies. "
+                "Selection is controlled by --llm-review-schedule."
             ),
         ),
+    ] = None,
+    llm_review_schedule: Annotated[
+        LLMReviewSchedule,
+        typer.Option(
+            help="Choose provider review opportunities: first, evenly, or custom."
+        ),
+    ] = LLMReviewSchedule.FIRST,
+    llm_review_indices: Annotated[
+        str | None,
+        typer.Option(help="Comma-separated 1-based opportunity numbers for custom scheduling."),
     ] = None,
     dashboard: Annotated[
         bool,
@@ -464,7 +557,10 @@ def backtest(
         raise typer.BadParameter(
             "--agent-events requires --use-llm and --llm-workflow trading-agents"
         )
-    frames = _frames(data_root, settings.universe)
+    try:
+        frames = _frames(data_root, settings.universe, start, end)
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from None
     reviewer = None
     client = None
     agent_reviewer: TradingAgentsReviewer | None = None
@@ -518,11 +614,26 @@ def backtest(
         rules_result = run_backtest(frames, settings, reviewer=rules_counter)  # type: ignore[arg-type]
         if use_llm:
             assert reviewer is not None
+            plan = _review_plan(
+                rules_counter.calls,
+                max_reviews,
+                llm_review_schedule,
+                llm_review_indices,
+            )
+            if plan is not None:
+                reviewer.set_review_indices(plan)
             typer.echo(
                 f"{reviewer.provider_name} enabled: this backtest can request up to "
                 f"{rules_counter.calls} reviews.",
                 err=True,
             )
+            if plan is not None:
+                rendered = ", ".join(str(index) for index in plan)
+                typer.echo(
+                    f"{reviewer.provider_name} review plan: {len(plan)}/"
+                    f"{rules_counter.calls} opportunities at indices {rendered}.",
+                    err=True,
+                )
         llm_result = (
             run_backtest(frames, settings, reviewer=reviewer)  # type: ignore[arg-type]
             if reviewer is not None
@@ -551,11 +662,21 @@ def backtest(
             runs["llm"] = llm_result.to_dict()
         note = "Paper simulation only."
         if isinstance(reviewer, _ProgressReviewer) and reviewer.truncated_calls:
-            note = (
-                "LLM smoke run truncated: only the first "
-                f"{reviewer.real_calls} reviews used {reviewer.provider_name}; remaining reviews "
-                "used local rules-only replies."
-            )
+            indices = reviewer.review_indices
+            first = tuple(range(1, reviewer.real_calls + 1))
+            if indices == first:
+                note = (
+                    "LLM smoke run truncated: only the first "
+                    f"{reviewer.real_calls} reviews used {reviewer.provider_name}; remaining "
+                    "reviews used local rules-only replies."
+                )
+            else:
+                rendered = ", ".join(str(index) for index in (indices or ()))
+                note = (
+                    f"LLM scheduled run: {reviewer.real_calls} reviews used "
+                    f"{reviewer.provider_name} at opportunity indices {rendered}; other reviews "
+                    "used local rules-only replies."
+                )
         if (
             llm_result is not None
             and not (isinstance(reviewer, _ProgressReviewer) and reviewer.truncated_calls)
