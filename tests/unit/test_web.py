@@ -91,6 +91,7 @@ def _manager(tmp_path: Path, commands: list[list[str]]) -> WebJobManager:
         data_root=data,
         output_root=tmp_path / "runs",
         process_factory=process,
+        traex_model_source=lambda: ("gpt-5.5", "qwen-3.6-plus"),
         workers=1,
     )
 
@@ -103,6 +104,20 @@ def test_request_rejects_incompatible_provider() -> None:
 def test_traex_is_allowed_for_llm_modes() -> None:
     request = WebRunRequest(mode=WebMode.FINMEM, provider=WebProvider.TRAEX)
     assert request.provider is WebProvider.TRAEX
+
+
+def test_manager_rejects_model_not_reported_by_local_traex(tmp_path: Path) -> None:
+    manager = _manager(tmp_path, [])
+    try:
+        parameters = {**manager.defaults(), "traex_model": "not-installed"}
+        with pytest.raises(ValueError, match="traex models"):
+            manager.submit(
+                WebRunRequest.model_validate(
+                    {"mode": "rules", "provider": "rules", "parameters": parameters}
+                )
+            )
+    finally:
+        manager.close()
 
 
 def test_background_rules_job_collects_logs_and_result(tmp_path: Path) -> None:
@@ -170,6 +185,7 @@ def test_run_parameters_create_isolated_safe_config(tmp_path: Path) -> None:
         config_text = config_path.read_text(encoding="utf-8")
         assert "initial_cash: 250000" in config_text
         assert "target_volatility: 0.12" in config_text
+        assert "traex_model: gpt-5.5" in config_text
         assert "api_key" not in config_text
         assert run["parameters"]["universe"] == ["SPY", "QQQ"]
     finally:
@@ -185,7 +201,9 @@ def test_token_protected_http_api_submits_run(tmp_path: Path) -> None:
         with urlopen(url, timeout=2) as response:
             assert "Quant Trader Lab" in response.read().decode()
         with urlopen(url + "api/config", timeout=2) as response:
-            assert json.loads(response.read())["parameters"]["universe"] == ["SPY"]
+            config = json.loads(response.read())
+            assert config["parameters"]["universe"] == ["SPY"]
+            assert config["traex_models"] == ["gpt-5.5", "qwen-3.6-plus"]
         request = Request(
             url + "api/runs",
             data=json.dumps({"mode": "rules", "provider": "rules"}).encode(),
@@ -214,6 +232,9 @@ def test_web_page_contains_agent_board_and_equity_chart() -> None:
     assert "rules_only:'规则策略'" in WEB_HTML
     assert "repeating-linear-gradient" in WEB_HTML
     assert '<option value="traex">本地 Trae X</option>' in WEB_HTML
+    assert '<option value="gpt-5.5">gpt-5.5（默认）</option>' in WEB_HTML
+    assert 'id="traexModelBox"' in WEB_HTML
+    assert "body.traex_models" in WEB_HTML
     assert 'id="targetVolatility"' in WEB_HTML
     assert 'id="targetVolatility" type="number" min="0.01" max="100" step="any"' in WEB_HTML
     assert 'id="initialCash" type="number" min="1" step="any"' in WEB_HTML

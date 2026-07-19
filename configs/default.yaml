@@ -21,3 +21,4 @@ llm:
   prompt_version: v1
   timeout_seconds: 30
   max_retries: 2
+  traex_model: gpt-5.5

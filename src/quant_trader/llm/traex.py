@@ -56,14 +56,18 @@ class TraexReviewer:
     def __init__(
         self,
         executable: str = "traex",
+        model: str = "gpt-5.5",
         timeout_seconds: float = 120,
         max_output_bytes: int = 65_536,
     ) -> None:
         if not executable.strip() or "\x00" in executable:
             raise ValueError("executable must be nonblank and contain no null byte")
+        if not model.strip() or model != model.strip() or "\x00" in model:
+            raise ValueError("model must be nonblank, trimmed, and contain no null byte")
         if timeout_seconds <= 0 or max_output_bytes < 1:
             raise ValueError("timeout and output bound must be positive")
         self._executable = executable
+        self._model = model
         self._timeout_seconds = timeout_seconds
         self._max_output_bytes = max_output_bytes
 
@@ -83,6 +87,8 @@ class TraexReviewer:
                 [
                     self._executable,
                     "exec",
+                    "--model",
+                    self._model,
                     "--ephemeral",
                     "--sandbox",
                     "read-only",
