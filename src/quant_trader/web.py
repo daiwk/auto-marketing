@@ -12,7 +12,7 @@ import threading
 import webbrowser
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -60,6 +60,12 @@ class WebProvider(StrEnum):
     TRAEX = "traex"
 
 
+class WebReviewSchedule(StrEnum):
+    FIRST = "first"
+    EVENLY = "evenly"
+    CUSTOM = "custom"
+
+
 class WebParameters(BaseModel):
     """All user-facing strategy settings, flattened for a small web form."""
 
@@ -96,12 +102,18 @@ class WebRunRequest(BaseModel):
 
     mode: WebMode
     provider: WebProvider
+    start: date = date(2023, 1, 1)
+    end: date = date(2026, 1, 1)
     max_reviews: int = Field(default=1, ge=1, le=10)
+    review_schedule: WebReviewSchedule = WebReviewSchedule.EVENLY
+    review_indices: tuple[int, ...] = Field(default=(), max_length=10)
     contestant_ids: tuple[str, ...] = Field(default=(), max_length=20)
     parameters: WebParameters | None = None
 
     @model_validator(mode="after")
     def validate_combination(self) -> WebRunRequest:
+        if self.start >= self.end:
+            raise ValueError("开始日期必须早于结束日期")
         if self.mode is WebMode.RULES and self.provider is not WebProvider.RULES:
             raise ValueError("rules mode requires the rules provider")
         if self.mode in {WebMode.TRADING_AGENTS, WebMode.FINMEM, WebMode.QUANTA_ALPHA}:
@@ -117,6 +129,18 @@ class WebRunRequest(BaseModel):
             raise ValueError("contestants are only valid for Alpha Arena")
         if len(set(self.contestant_ids)) != len(self.contestant_ids):
             raise ValueError("contestant ids must be unique")
+        if self.mode is WebMode.TRADING_AGENTS:
+            if self.review_schedule is WebReviewSchedule.CUSTOM:
+                if (
+                    len(self.review_indices) != self.max_reviews
+                    or len(set(self.review_indices)) != len(self.review_indices)
+                    or any(index < 1 for index in self.review_indices)
+                ):
+                    raise ValueError("指定序号必须为不重复正整数，且数量等于审核次数")
+            elif self.review_indices:
+                raise ValueError("只有指定序号模式可以填写审核序号")
+        elif self.review_schedule is not WebReviewSchedule.EVENLY or self.review_indices:
+            raise ValueError("审核调度只适用于 TradingAgents")
         return self
 
 
@@ -313,7 +337,11 @@ class WebJobManager:
                 "id": run_id,
                 "mode": request.mode.value,
                 "provider": request.provider.value,
+                "start": request.start.isoformat(),
+                "end": request.end.isoformat(),
                 "max_reviews": request.max_reviews,
+                "review_schedule": request.review_schedule.value,
+                "review_indices": list(request.review_indices),
                 "contestant_ids": list(request.contestant_ids),
                 "parameters": parameters.model_dump(mode="json"),
                 "status": "queued",
@@ -369,11 +397,15 @@ class WebJobManager:
             self._jobs[run_id]["run_config"],
             "--data-root",
             str(self.data_root),
+            "--start",
+            request.start.isoformat(),
+            "--end",
+            request.end.isoformat(),
         ]
         if request.mode is WebMode.RULES:
             return [*base, "backtest", *common, "--output", str(run_dir / "run.json")]
         if request.mode is WebMode.TRADING_AGENTS:
-            return [
+            command = [
                 *base,
                 "backtest",
                 *common,
@@ -386,9 +418,16 @@ class WebJobManager:
                 "trading-agents",
                 "--llm-max-reviews",
                 str(request.max_reviews),
+                "--llm-review-schedule",
+                request.review_schedule.value,
                 "--agent-events",
                 str(run_dir / "agent-events.jsonl"),
             ]
+            if request.review_schedule is WebReviewSchedule.CUSTOM:
+                command.extend(
+                    ("--llm-review-indices", ",".join(map(str, request.review_indices)))
+                )
+            return command
         experiment = [
             *base,
             "experiment",
