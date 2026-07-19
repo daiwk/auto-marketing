@@ -18,8 +18,11 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from quant_trader.config import Settings, load_settings
+from quant_trader.validation import StrictInteger, StrictNumber, USEquityTicker
 from quant_trader.web_template import WEB_HTML
 
 _MAX_BODY_BYTES = 64 * 1024
@@ -50,6 +53,35 @@ class WebProvider(StrEnum):
     RULES = "rules"
     MINIMAX = "minimax"
     CODEX = "codex"
+    TRAEX = "traex"
+
+
+class WebParameters(BaseModel):
+    """All user-facing strategy settings, flattened for a small web form."""
+
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+    universe: tuple[USEquityTicker, ...] = Field(min_length=1, max_length=100)
+    initial_cash: StrictNumber = Field(gt=0)
+    max_candidates: StrictInteger = Field(ge=1, le=100)
+    min_average_dollar_volume: StrictNumber = Field(ge=0)
+    target_volatility: StrictNumber = Field(gt=0, le=1)
+    max_position_weight: StrictNumber = Field(gt=0, le=1)
+    max_gross_exposure: StrictNumber = Field(gt=0, le=1)
+    min_cash_weight: StrictNumber = Field(ge=0, le=1)
+    reduce_drawdown: StrictNumber = Field(gt=0, le=1)
+    halt_drawdown: StrictNumber = Field(gt=0, le=1)
+    atr_multiple: StrictNumber = Field(gt=0)
+    slippage_bps: StrictNumber = Field(ge=0, le=10_000)
+    commission_bps: StrictNumber = Field(ge=0, le=10_000)
+
+    @model_validator(mode="after")
+    def validate_cross_fields(self) -> WebParameters:
+        if self.min_cash_weight + self.max_gross_exposure > 1:
+            raise ValueError("最低现金比例与最大总仓位之和不能超过 100%")
+        if self.reduce_drawdown >= self.halt_drawdown:
+            raise ValueError("减仓回撤必须小于停止交易回撤")
+        return self
 
 
 class WebRunRequest(BaseModel):
@@ -61,14 +93,19 @@ class WebRunRequest(BaseModel):
     provider: WebProvider
     max_reviews: int = Field(default=1, ge=1, le=10)
     contestant_ids: tuple[str, ...] = Field(default=(), max_length=20)
+    parameters: WebParameters | None = None
 
     @model_validator(mode="after")
     def validate_combination(self) -> WebRunRequest:
         if self.mode is WebMode.RULES and self.provider is not WebProvider.RULES:
             raise ValueError("rules mode requires the rules provider")
         if self.mode in {WebMode.TRADING_AGENTS, WebMode.FINMEM, WebMode.QUANTA_ALPHA}:
-            if self.provider not in {WebProvider.MINIMAX, WebProvider.CODEX}:
-                raise ValueError("this mode requires MiniMax or Codex")
+            if self.provider not in {
+                WebProvider.MINIMAX,
+                WebProvider.CODEX,
+                WebProvider.TRAEX,
+            }:
+                raise ValueError("this mode requires MiniMax, Codex, or Trae X")
         if self.mode is WebMode.ALPHA_ARENA and self.provider is not WebProvider.RULES:
             raise ValueError("Alpha Arena is an artifact-only rules run")
         if self.mode is not WebMode.ALPHA_ARENA and self.contestant_ids:
@@ -140,6 +177,8 @@ class WebJobManager:
         self.output_root = output_root.resolve()
         if not self.config.is_file() or not self.data_root.is_dir():
             raise ValueError("config and data root must exist")
+        self._settings = load_settings(self.config)
+        self._default_parameters = self._parameters_from_settings(self._settings)
         self.output_root.mkdir(parents=True, exist_ok=True)
         self._process_factory = process_factory
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="quant-web")
@@ -147,6 +186,58 @@ class WebJobManager:
         self._jobs: dict[str, dict[str, Any]] = {}
         self._processes: dict[str, ProcessLike] = {}
         self._closed = False
+
+    @staticmethod
+    def _parameters_from_settings(settings: Settings) -> WebParameters:
+        return WebParameters(
+            universe=settings.universe,
+            initial_cash=settings.paper.initial_cash,
+            max_candidates=settings.strategy.max_candidates,
+            min_average_dollar_volume=settings.strategy.min_average_dollar_volume,
+            target_volatility=settings.strategy.target_volatility,
+            max_position_weight=settings.risk.max_position_weight,
+            max_gross_exposure=settings.risk.max_gross_exposure,
+            min_cash_weight=settings.risk.min_cash_weight,
+            reduce_drawdown=settings.risk.reduce_drawdown,
+            halt_drawdown=settings.risk.halt_drawdown,
+            atr_multiple=settings.risk.atr_multiple,
+            slippage_bps=settings.execution.slippage_bps,
+            commission_bps=settings.execution.commission_bps,
+        )
+
+    def defaults(self) -> dict[str, object]:
+        """Return safe frontend defaults without credentials or server paths."""
+        return self._default_parameters.model_dump(mode="json")
+
+    def _write_run_config(self, run_dir: Path, parameters: WebParameters) -> Path:
+        payload = {
+            "universe": list(parameters.universe),
+            "paper": {"initial_cash": parameters.initial_cash},
+            "strategy": {
+                "max_candidates": parameters.max_candidates,
+                "min_average_dollar_volume": parameters.min_average_dollar_volume,
+                "target_volatility": parameters.target_volatility,
+            },
+            "risk": {
+                "max_position_weight": parameters.max_position_weight,
+                "max_gross_exposure": parameters.max_gross_exposure,
+                "min_cash_weight": parameters.min_cash_weight,
+                "reduce_drawdown": parameters.reduce_drawdown,
+                "halt_drawdown": parameters.halt_drawdown,
+                "atr_multiple": parameters.atr_multiple,
+            },
+            "execution": {
+                "slippage_bps": parameters.slippage_bps,
+                "commission_bps": parameters.commission_bps,
+            },
+            "llm": self._settings.llm.model_dump(mode="json", exclude={"api_key"}),
+        }
+        Settings.model_validate(payload)
+        path = run_dir / "config.yaml"
+        path.write_text(
+            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
+        )
+        return path
 
     def submit(self, request: WebRunRequest) -> str:
         with self._condition:
@@ -166,12 +257,16 @@ class WebJobManager:
             run_id = uuid4().hex
             run_dir = self.output_root / run_id
             run_dir.mkdir(parents=True, exist_ok=False)
+            parameters = request.parameters or self._default_parameters
+            run_config = self._write_run_config(run_dir, parameters)
+            request = request.model_copy(update={"parameters": parameters})
             self._jobs[run_id] = {
                 "id": run_id,
                 "mode": request.mode.value,
                 "provider": request.provider.value,
                 "max_reviews": request.max_reviews,
                 "contestant_ids": list(request.contestant_ids),
+                "parameters": parameters.model_dump(mode="json"),
                 "status": "queued",
                 "created_at": _now(),
                 "started_at": None,
@@ -183,6 +278,7 @@ class WebJobManager:
                 "result": None,
                 "error": None,
                 "run_dir": str(run_dir),
+                "run_config": str(run_config),
             }
             self._event_locked(run_id, "queued", "任务已进入后台队列")
             self._persist_locked(run_id)
@@ -221,7 +317,7 @@ class WebJobManager:
         ]
         common = [
             "--config",
-            str(self.config),
+            self._jobs[run_id]["run_config"],
             "--data-root",
             str(self.data_root),
         ]
@@ -444,6 +540,7 @@ class WebJobManager:
     def _public(job: dict[str, Any], *, include_events: bool) -> dict[str, Any]:
         value = copy.deepcopy(job)
         value.pop("run_dir", None)
+        value.pop("run_config", None)
         if not include_events:
             value.pop("events", None)
             value.pop("agent_events", None)
@@ -508,6 +605,9 @@ class WebPlatformServer:
                     return
                 if self.path == f"{prefix}api/runs":
                     self._json(200, {"runs": manager.list_runs()})
+                    return
+                if self.path == f"{prefix}api/config":
+                    self._json(200, {"parameters": manager.defaults()})
                     return
                 run_prefix = f"{prefix}api/runs/"
                 if self.path.startswith(run_prefix):

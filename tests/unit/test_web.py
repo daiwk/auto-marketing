@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from quant_trader.web import (
     WebJobManager,
     WebMode,
+    WebParameters,
     WebPlatformServer,
     WebProvider,
     WebRunRequest,
@@ -95,8 +96,13 @@ def _manager(tmp_path: Path, commands: list[list[str]]) -> WebJobManager:
 
 
 def test_request_rejects_incompatible_provider() -> None:
-    with pytest.raises(ValidationError, match="requires MiniMax or Codex"):
+    with pytest.raises(ValidationError, match="requires MiniMax, Codex, or Trae X"):
         WebRunRequest(mode=WebMode.FINMEM, provider=WebProvider.RULES)
+
+
+def test_traex_is_allowed_for_llm_modes() -> None:
+    request = WebRunRequest(mode=WebMode.FINMEM, provider=WebProvider.TRAEX)
+    assert request.provider is WebProvider.TRAEX
 
 
 def test_background_rules_job_collects_logs_and_result(tmp_path: Path) -> None:
@@ -137,6 +143,39 @@ def test_trading_agents_command_is_bounded(tmp_path: Path) -> None:
         manager.close()
 
 
+def test_run_parameters_create_isolated_safe_config(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    manager = _manager(tmp_path, commands)
+    try:
+        defaults = manager.defaults()
+        parameters = WebParameters.model_validate(
+            {
+                **defaults,
+                "universe": ["SPY", "QQQ"],
+                "initial_cash": 250000,
+                "target_volatility": 0.12,
+            }
+        )
+        run_id = manager.submit(
+            WebRunRequest(
+                mode=WebMode.RULES,
+                provider=WebProvider.RULES,
+                parameters=parameters,
+            )
+        )
+        run = manager.wait(run_id)
+        assert run is not None
+        config_path = Path(commands[0][commands[0].index("--config") + 1])
+        assert config_path.parent.name == run_id
+        config_text = config_path.read_text(encoding="utf-8")
+        assert "initial_cash: 250000" in config_text
+        assert "target_volatility: 0.12" in config_text
+        assert "api_key" not in config_text
+        assert run["parameters"]["universe"] == ["SPY", "QQQ"]
+    finally:
+        manager.close()
+
+
 def test_token_protected_http_api_submits_run(tmp_path: Path) -> None:
     commands: list[list[str]] = []
     manager = _manager(tmp_path, commands)
@@ -145,6 +184,8 @@ def test_token_protected_http_api_submits_run(tmp_path: Path) -> None:
     try:
         with urlopen(url, timeout=2) as response:
             assert "Quant Trader Lab" in response.read().decode()
+        with urlopen(url + "api/config", timeout=2) as response:
+            assert json.loads(response.read())["parameters"]["universe"] == ["SPY"]
         request = Request(
             url + "api/runs",
             data=json.dumps({"mode": "rules", "provider": "rules"}).encode(),
@@ -172,3 +213,6 @@ def test_web_page_contains_agent_board_and_equity_chart() -> None:
     assert "agent_events" in WEB_HTML
     assert "rules_only:'规则策略'" in WEB_HTML
     assert "repeating-linear-gradient" in WEB_HTML
+    assert '<option value="traex">本地 Trae X</option>' in WEB_HTML
+    assert 'id="targetVolatility"' in WEB_HTML
+    assert "parameters:parameters()" in WEB_HTML
