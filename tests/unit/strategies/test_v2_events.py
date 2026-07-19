@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Sequence
 from datetime import date
+
+import pytest
 
 from quant_trader.core.models import ReviewAction
 from quant_trader.features.snapshot import FeatureRow
 from quant_trader.llm.base import MessageInput
 from quant_trader.llm.parsing import parse_review
+from quant_trader.llm.traex import TraexReviewer
 from quant_trader.strategies.v1_rules_llm.prompt import render_review_prompt
 from quant_trader.strategies.v1_rules_llm.rules import Candidate
 from quant_trader.strategies.v2_multi_agent.events import AgentEvent, AgentEventKind
@@ -139,3 +143,27 @@ def test_failed_role_emits_sanitized_failure_before_completion() -> None:
     ]
     assert events[-2].report is not None
     assert events[-2].report.summary == "该角色未能生成有效且满足边界要求的回复。"
+    assert events[-2].report.input_anomalies[-1] == "模型返回的角色内容不是有效 JSON"
+
+
+def test_traex_timeout_is_exposed_in_failed_role_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[AgentEvent] = []
+
+    def timeout(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(["traex"], 120)
+
+    monkeypatch.setattr("quant_trader.llm.traex.subprocess.run", timeout)
+    reviewer = TradingAgentsReviewer(
+        TraexReviewer(), provider_name="Trae X", on_event=events.append
+    )
+
+    result = parse_review(reviewer.complete(_messages()))
+
+    assert result.action is ReviewAction.REJECT
+    failed = next(event for event in events if event.kind is AgentEventKind.ROLE_FAILED)
+    assert failed.report is not None
+    assert failed.report.input_anomalies[-1] == (
+        "Trae X review timed out after 120 seconds"
+    )

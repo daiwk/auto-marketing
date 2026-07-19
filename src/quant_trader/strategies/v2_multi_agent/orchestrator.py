@@ -8,9 +8,12 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from typing import Any
 
+from pydantic import ValidationError
+
 from quant_trader.core.models import LLMReview, ReviewAction
 from quant_trader.llm.base import LLMReviewer, MessageInput, canonical_messages
 from quant_trader.llm.parsing import parse_review
+from quant_trader.llm.traex import TraexError
 from quant_trader.strategies.v2_multi_agent.context import context_for
 from quant_trader.strategies.v2_multi_agent.events import AgentEvent, AgentEventKind
 from quant_trader.strategies.v2_multi_agent.models import (
@@ -62,14 +65,24 @@ def _unavailable(role: RoleName) -> RoleReport:
     )
 
 
-def _failed(role: RoleName) -> RoleReport:
+def _failure_reason(error: BaseException) -> str:
+    if isinstance(error, TraexError):
+        return error.safe_message[:500]
+    if isinstance(error, json.JSONDecodeError):
+        return "模型返回的角色内容不是有效 JSON"
+    if isinstance(error, ValidationError):
+        return "模型返回的 JSON 不符合当前角色字段约束"
+    return f"{type(error).__name__}: 模型回复未通过工作流校验"[:500]
+
+
+def _failed(role: RoleName, reason: str) -> RoleReport:
     return RoleReport(
         role=role,
         status=ReportStatus.FAILED,
         stance=Stance.NEUTRAL,
         confidence=0,
         summary="该角色未能生成有效且满足边界要求的回复。",
-        input_anomalies=("角色执行失败",),
+        input_anomalies=("角色执行失败", reason),
     )
 
 
@@ -333,8 +346,9 @@ class TradingAgentsReviewer:
             failure_role = None
         except Exception as error:
             self._notify(current_role, "failed")
+            reason = _failure_reason(error)
             _clear_error(error)
-            failed = _failed(current_role)
+            failed = _failed(current_role, reason)
             reports.append(failed)
             event(AgentEventKind.ROLE_FAILED, role=current_role, report_value=failed)
             final = _synthetic_reject(current_role)
