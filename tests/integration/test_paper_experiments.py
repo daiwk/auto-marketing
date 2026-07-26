@@ -163,6 +163,72 @@ def test_quanta_alpha_command_writes_result_from_date_ticker_panel(
     assert json.loads((run / "quanta_alpha" / "result.json").read_text())["champion"]
 
 
+@pytest.mark.parametrize(
+    ("kind", "miner_name", "module_name"),
+    [
+        ("alpha-agent", "AlphaAgentMiner", "alpha_agent"),
+        ("chain-of-alpha", "ChainOfAlphaMiner", "chain_of_alpha"),
+    ],
+)
+def test_recent_paper_commands_write_bounded_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    kind: str,
+    miner_name: str,
+    module_name: str,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeMiner:
+        def __init__(self, reviewer: object, **kwargs: object) -> None:
+            observed["reviewer"] = reviewer
+            observed["kwargs"] = kwargs
+
+        def mine(self, panel: pd.DataFrame) -> dict[str, object]:
+            observed["index"] = panel.index.names
+            return {
+                "status": "complete",
+                "paper": {"arxiv_id": "test"},
+                "champion": {"expression": "rank(returns)", "test_ic": 0.1},
+                "candidates": [{"expression": "rank(returns)", "rejection_reason": None}],
+            }
+
+    monkeypatch.setattr("quant_trader.cli._frames", lambda *args: _frames())
+    monkeypatch.setattr(
+        "quant_trader.cli._open_provider",
+        lambda *args, **kwargs: (_Provider(), None, "Codex"),
+    )
+    monkeypatch.setattr(f"quant_trader.experiments.run.{miner_name}", FakeMiner)
+    output = tmp_path / "runs"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "experiment",
+            "run",
+            kind,
+            "--config",
+            str(_config(tmp_path / "config.yaml")),
+            "--data-root",
+            str(tmp_path),
+            "--output-dir",
+            str(output),
+            "--llm-provider",
+            "codex",
+            "--factor-candidate-limit",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    run = next(output.iterdir())
+    payload = json.loads((run / module_name / "result.json").read_text())
+    assert payload["champion"]["test_ic"] == 0.1
+    assert observed["index"] == ["date", "ticker"]
+    assert observed["kwargs"]["candidate_limit"] == 3
+    assert json.loads((run / "summary.json").read_text())["metrics"]["provider_calls"] == 0
+
+
 def test_alpha_arena_never_constructs_a_provider(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

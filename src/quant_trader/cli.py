@@ -20,7 +20,13 @@ from quant_trader.data.cache import ParquetMarketCache
 from quant_trader.data.sina_source import SinaSource
 from quant_trader.data.validation import DataValidationError
 from quant_trader.data.yfinance_source import YFinanceSource
-from quant_trader.experiments.run import run_alpha_arena, run_finmem, run_quanta_alpha
+from quant_trader.experiments.run import (
+    run_alpha_agent,
+    run_alpha_arena,
+    run_chain_of_alpha,
+    run_finmem,
+    run_quanta_alpha,
+)
 from quant_trader.llm.base import LLMReviewer, MessageInput
 from quant_trader.llm.codex import CodexError, CodexReviewer
 from quant_trader.llm.minimax import MiniMaxError, MiniMaxReviewer
@@ -340,6 +346,11 @@ def _run_experiment_command(
     start: datetime | None = None,
     end: datetime | None = None,
     contestant_runs: tuple[Path, ...] = (),
+    factor_candidate_limit: int = 4,
+    factor_optimization_rounds: int = 2,
+    factor_complexity_penalty: float = 0.001,
+    factor_novelty_penalty: float = 0.10,
+    factor_decay_penalty: float = 0.50,
 ) -> None:
     client: MiniMaxReviewer | None = None
     dashboard_run = _DashboardRun(dashboard)
@@ -398,6 +409,35 @@ def _run_experiment_command(
                 provider_name,
                 model,
                 update if dashboard else None,
+            )
+        elif kind == "alpha-agent":
+            assert provider is not None
+            root = run_alpha_agent(
+                settings,
+                frames,
+                output_dir,
+                provider,
+                provider_name,
+                model,
+                candidate_limit=factor_candidate_limit,
+                complexity_penalty=factor_complexity_penalty,
+                novelty_penalty=factor_novelty_penalty,
+                decay_penalty=factor_decay_penalty,
+                dashboard=update if dashboard else None,
+            )
+        elif kind == "chain-of-alpha":
+            assert provider is not None
+            root = run_chain_of_alpha(
+                settings,
+                frames,
+                output_dir,
+                provider,
+                provider_name,
+                model,
+                candidate_limit=factor_candidate_limit,
+                optimization_rounds=factor_optimization_rounds,
+                complexity_penalty=factor_complexity_penalty,
+                dashboard=update if dashboard else None,
             )
         else:
             root = run_alpha_arena(
@@ -459,6 +499,64 @@ def experiment_quanta_alpha(
     """Mine a safe factor DSL with at most two provider calls."""
     _run_experiment_command(
         "quanta-alpha", config, data_root, output_dir, llm_provider, dashboard, start, end
+    )
+
+
+@experiment_run_app.command("alpha-agent")
+def experiment_alpha_agent(
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output_dir: Annotated[Path, typer.Option()],
+    llm_provider: Annotated[LLMProvider, typer.Option()] = LLMProvider.MINIMAX,
+    start: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    end: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    factor_candidate_limit: Annotated[int, typer.Option(min=1, max=8)] = 4,
+    factor_complexity_penalty: Annotated[float, typer.Option(min=0)] = 0.001,
+    factor_novelty_penalty: Annotated[float, typer.Option(min=0)] = 0.10,
+    factor_decay_penalty: Annotated[float, typer.Option(min=0)] = 0.50,
+) -> None:
+    """Run the bounded AlphaAgent paper adaptation."""
+    _run_experiment_command(
+        "alpha-agent",
+        config,
+        data_root,
+        output_dir,
+        llm_provider,
+        False,
+        start,
+        end,
+        factor_candidate_limit=factor_candidate_limit,
+        factor_complexity_penalty=factor_complexity_penalty,
+        factor_novelty_penalty=factor_novelty_penalty,
+        factor_decay_penalty=factor_decay_penalty,
+    )
+
+
+@experiment_run_app.command("chain-of-alpha")
+def experiment_chain_of_alpha(
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output_dir: Annotated[Path, typer.Option()],
+    llm_provider: Annotated[LLMProvider, typer.Option()] = LLMProvider.MINIMAX,
+    start: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    end: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    factor_candidate_limit: Annotated[int, typer.Option(min=1, max=8)] = 4,
+    factor_optimization_rounds: Annotated[int, typer.Option(min=1, max=3)] = 2,
+    factor_complexity_penalty: Annotated[float, typer.Option(min=0)] = 0.001,
+) -> None:
+    """Run the bounded Chain-of-Alpha paper adaptation."""
+    _run_experiment_command(
+        "chain-of-alpha",
+        config,
+        data_root,
+        output_dir,
+        llm_provider,
+        False,
+        start,
+        end,
+        factor_candidate_limit=factor_candidate_limit,
+        factor_optimization_rounds=factor_optimization_rounds,
+        factor_complexity_penalty=factor_complexity_penalty,
     )
 
 
