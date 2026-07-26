@@ -50,6 +50,8 @@ class WebMode(StrEnum):
     TRADING_AGENTS = "trading-agents"
     FINMEM = "finmem"
     QUANTA_ALPHA = "quanta-alpha"
+    ALPHA_AGENT = "alpha-agent"
+    CHAIN_OF_ALPHA = "chain-of-alpha"
     ALPHA_ARENA = "alpha-arena"
 
 
@@ -107,6 +109,11 @@ class WebRunRequest(BaseModel):
     max_reviews: int = Field(default=1, ge=1, le=10)
     review_schedule: WebReviewSchedule = WebReviewSchedule.EVENLY
     review_indices: tuple[int, ...] = Field(default=(), max_length=10)
+    factor_candidate_limit: int = Field(default=4, ge=1, le=8)
+    factor_optimization_rounds: int = Field(default=2, ge=1, le=3)
+    factor_complexity_penalty: float = Field(default=0.001, ge=0, le=1)
+    factor_novelty_penalty: float = Field(default=0.10, ge=0, le=1)
+    factor_decay_penalty: float = Field(default=0.50, ge=0, le=2)
     contestant_ids: tuple[str, ...] = Field(default=(), max_length=20)
     parameters: WebParameters | None = None
 
@@ -116,7 +123,13 @@ class WebRunRequest(BaseModel):
             raise ValueError("开始日期必须早于结束日期")
         if self.mode is WebMode.RULES and self.provider is not WebProvider.RULES:
             raise ValueError("rules mode requires the rules provider")
-        if self.mode in {WebMode.TRADING_AGENTS, WebMode.FINMEM, WebMode.QUANTA_ALPHA}:
+        if self.mode in {
+            WebMode.TRADING_AGENTS,
+            WebMode.FINMEM,
+            WebMode.QUANTA_ALPHA,
+            WebMode.ALPHA_AGENT,
+            WebMode.CHAIN_OF_ALPHA,
+        }:
             if self.provider not in {
                 WebProvider.MINIMAX,
                 WebProvider.CODEX,
@@ -342,6 +355,11 @@ class WebJobManager:
                 "max_reviews": request.max_reviews,
                 "review_schedule": request.review_schedule.value,
                 "review_indices": list(request.review_indices),
+                "factor_candidate_limit": request.factor_candidate_limit,
+                "factor_optimization_rounds": request.factor_optimization_rounds,
+                "factor_complexity_penalty": request.factor_complexity_penalty,
+                "factor_novelty_penalty": request.factor_novelty_penalty,
+                "factor_decay_penalty": request.factor_decay_penalty,
                 "contestant_ids": list(request.contestant_ids),
                 "parameters": parameters.model_dump(mode="json"),
                 "status": "queued",
@@ -437,8 +455,39 @@ class WebJobManager:
             "--output-dir",
             str(run_dir / "artifacts"),
         ]
-        if request.mode in {WebMode.FINMEM, WebMode.QUANTA_ALPHA}:
-            return [*experiment, "--llm-provider", request.provider.value]
+        if request.mode in {
+            WebMode.FINMEM,
+            WebMode.QUANTA_ALPHA,
+            WebMode.ALPHA_AGENT,
+            WebMode.CHAIN_OF_ALPHA,
+        }:
+            command = [*experiment, "--llm-provider", request.provider.value]
+            if request.mode in {WebMode.ALPHA_AGENT, WebMode.CHAIN_OF_ALPHA}:
+                command.extend(
+                    (
+                        "--factor-candidate-limit",
+                        str(request.factor_candidate_limit),
+                        "--factor-complexity-penalty",
+                        str(request.factor_complexity_penalty),
+                    )
+                )
+            if request.mode is WebMode.ALPHA_AGENT:
+                command.extend(
+                    (
+                        "--factor-novelty-penalty",
+                        str(request.factor_novelty_penalty),
+                        "--factor-decay-penalty",
+                        str(request.factor_decay_penalty),
+                    )
+                )
+            if request.mode is WebMode.CHAIN_OF_ALPHA:
+                command.extend(
+                    (
+                        "--factor-optimization-rounds",
+                        str(request.factor_optimization_rounds),
+                    )
+                )
+            return command
         for contestant_id in request.contestant_ids:
             artifact = self._jobs[contestant_id]["artifact_root"]
             experiment.extend(("--contestant-run", str(artifact)))
@@ -461,6 +510,8 @@ class WebJobManager:
                 WebMode.TRADING_AGENTS,
                 WebMode.FINMEM,
                 WebMode.QUANTA_ALPHA,
+                WebMode.ALPHA_AGENT,
+                WebMode.CHAIN_OF_ALPHA,
                 WebMode.ALPHA_ARENA,
             }:
                 monitor = threading.Thread(
@@ -604,6 +655,8 @@ class WebJobManager:
         module_files = {
             WebMode.FINMEM: artifact / "finmem" / "result.json",
             WebMode.QUANTA_ALPHA: artifact / "quanta_alpha" / "result.json",
+            WebMode.ALPHA_AGENT: artifact / "alpha_agent" / "result.json",
+            WebMode.CHAIN_OF_ALPHA: artifact / "chain_of_alpha" / "result.json",
             WebMode.ALPHA_ARENA: artifact / "alpha_arena" / "result.json",
         }
         return {

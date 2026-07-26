@@ -21,6 +21,7 @@ from quant_trader.llm.base import ChatMessage, LLMReviewer
 from quant_trader.strategies.v3_finmem import FinMemReviewer, MemoryBook
 from quant_trader.strategies.v4_quanta_alpha import QuantaAlphaMiner
 from quant_trader.strategies.v5_alpha_arena import AlphaArena, ArenaConfig
+from quant_trader.strategies.v6_recent_alpha import AlphaAgentMiner, ChainOfAlphaMiner
 
 DashboardUpdate = Callable[[str, str, dict[str, object]], None]
 ProgressFactory = Callable[[object], object]
@@ -220,6 +221,169 @@ def run_quanta_alpha(
     if dashboard is not None:
         dashboard("complete", status.value, {"calls": calls, **result})
     return store.root
+
+
+def _run_recent_alpha(
+    kind: str,
+    settings: Settings,
+    frames: Mapping[str, pd.DataFrame],
+    output_dir: Path,
+    provider: LLMReviewer,
+    provider_name: str,
+    model: str,
+    *,
+    candidate_limit: int,
+    optimization_rounds: int,
+    complexity_penalty: float,
+    novelty_penalty: float,
+    decay_penalty: float,
+    dashboard: DashboardUpdate | None = None,
+) -> Path:
+    attempt_limit = (
+        1 if kind == "alpha-agent" else optimization_rounds + 1
+    )
+    store = _create_store(
+        kind, settings, frames, output_dir, provider_name, model, attempt_limit
+    )
+    calls = 0
+
+    def review(prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        if len(prompt.encode("utf-8")) > 16_384:
+            raise ValueError("factor review request is too large")
+        return provider.complete(
+            (
+                ChatMessage(
+                    role="system",
+                    content=(
+                        "你是受约束的量化因子研究员。只返回 JSON，不得输出代码、交易指令"
+                        "或 DSL 之外的表达式。"
+                    ),
+                ),
+                ChatMessage(role="user", content=prompt),
+            )
+        )
+
+    store.append_event(
+        "stage", "mine", f"Started bounded {kind} paper adaptation.", ExperimentStatus.RUNNING
+    )
+    if dashboard is not None:
+        dashboard("mine", "running", {"calls": 0, "candidates": [], "rounds": []})
+    panel = _panel(frames)
+    miner: AlphaAgentMiner | ChainOfAlphaMiner
+
+    def progress(stage: str, message: str) -> None:
+        store.append_event("stage", stage, message, ExperimentStatus.RUNNING)
+        if dashboard is not None:
+            dashboard(stage, "running", {"calls": calls, "message": message})
+
+    if kind == "alpha-agent":
+        miner = AlphaAgentMiner(
+            review,
+            candidate_limit=candidate_limit,
+            complexity_penalty=complexity_penalty,
+            novelty_penalty=novelty_penalty,
+            decay_penalty=decay_penalty,
+            progress=progress,
+        )
+        module = "alpha_agent"
+    else:
+        miner = ChainOfAlphaMiner(
+            review,
+            candidate_limit=candidate_limit,
+            optimization_rounds=optimization_rounds,
+            complexity_penalty=complexity_penalty,
+            progress=progress,
+        )
+        module = "chain_of_alpha"
+    result = _json_safe(miner.mine(panel))
+    assert isinstance(result, dict)
+    _write_json(store.root / module / "result.json", result)
+    candidates = result.get("candidates")
+    candidate_count = len(candidates) if isinstance(candidates, list) else 0
+    champion = result.get("champion") is not None
+    status = ExperimentStatus.COMPLETED if champion else ExperimentStatus.PARTIAL
+    store.append_event("result", "persist", "Wrote paper-inspired factor artifacts.", status)
+    store.write_summary(
+        status,
+        {
+            "provider_calls": calls,
+            "candidate_count": candidate_count,
+            "champion": champion,
+            "paper_arxiv_id": (
+                result["paper"].get("arxiv_id")
+                if isinstance(result.get("paper"), dict)
+                else None
+            ),
+        },
+    )
+    if dashboard is not None:
+        dashboard("complete", status.value, {"calls": calls, **result})
+    return store.root
+
+
+def run_alpha_agent(
+    settings: Settings,
+    frames: Mapping[str, pd.DataFrame],
+    output_dir: Path,
+    provider: LLMReviewer,
+    provider_name: str,
+    model: str,
+    *,
+    candidate_limit: int = 4,
+    complexity_penalty: float = 0.001,
+    novelty_penalty: float = 0.10,
+    decay_penalty: float = 0.50,
+    dashboard: DashboardUpdate | None = None,
+) -> Path:
+    """Run the bounded AlphaAgent regularized-exploration adaptation."""
+    return _run_recent_alpha(
+        "alpha-agent",
+        settings,
+        frames,
+        output_dir,
+        provider,
+        provider_name,
+        model,
+        candidate_limit=candidate_limit,
+        optimization_rounds=1,
+        complexity_penalty=complexity_penalty,
+        novelty_penalty=novelty_penalty,
+        decay_penalty=decay_penalty,
+        dashboard=dashboard,
+    )
+
+
+def run_chain_of_alpha(
+    settings: Settings,
+    frames: Mapping[str, pd.DataFrame],
+    output_dir: Path,
+    provider: LLMReviewer,
+    provider_name: str,
+    model: str,
+    *,
+    candidate_limit: int = 4,
+    optimization_rounds: int = 2,
+    complexity_penalty: float = 0.001,
+    dashboard: DashboardUpdate | None = None,
+) -> Path:
+    """Run the bounded Chain-of-Alpha dual-chain adaptation."""
+    return _run_recent_alpha(
+        "chain-of-alpha",
+        settings,
+        frames,
+        output_dir,
+        provider,
+        provider_name,
+        model,
+        candidate_limit=candidate_limit,
+        optimization_rounds=optimization_rounds,
+        complexity_penalty=complexity_penalty,
+        novelty_penalty=0,
+        decay_penalty=0,
+        dashboard=dashboard,
+    )
 
 
 def run_alpha_arena(

@@ -74,7 +74,9 @@ def test_cli_help_exits_successfully() -> None:
         assert f"│ {hidden} " not in result.output
 
 
-@pytest.mark.parametrize("kind", ["finmem", "quanta-alpha", "alpha-arena"])
+@pytest.mark.parametrize(
+    "kind", ["finmem", "quanta-alpha", "alpha-agent", "chain-of-alpha", "alpha-arena"]
+)
 def test_experiment_run_commands_exist(kind: str) -> None:
     result = CliRunner().invoke(app, ["experiment", "run", kind, "--help"])
 

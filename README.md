@@ -55,10 +55,43 @@ quant-trader web --port 8080 --no-open-browser
   复核规则候选。
 - **FinMem**：使用分层记忆辅助候选决策。
 - **QuantaAlpha**：在受限因子 DSL 中生成和筛选候选因子。
+- **AlphaAgent（2025）**：对候选因子施加结构复杂度、新颖性和跨时期衰减惩罚。
+- **Chain-of-Alpha（2025）**：通过因子生成链、验证反馈和优化链迭代改进因子。
 - **Alpha Arena**：比较已经完成的 FinMem 或 QuantaAlpha 实验。
 
 LLM 只能维持、减仓或拒绝规则已经选出的候选，不能绕过风险限制，也不能创建规则之外的
 股票和订单。因此 LLM 曲线不一定优于规则曲线。
+
+## 新论文模式
+
+### AlphaAgent
+
+参考论文：[AlphaAgent: LLM-Driven Alpha Mining with Regularized Exploration to Counteract
+Alpha Decay](https://arxiv.org/abs/2502.16789)。
+
+网页 MVP 保留论文中最适合本地验证的三项机制：
+
+- 解析安全 DSL 的 AST 节点数，用复杂度惩罚限制过拟合；
+- 比较候选因子的结构相似度，对同质化因子施加新颖性惩罚；
+- 将验证集再按时间分段，对前后 IC 差异施加衰减惩罚。
+
+页面展示每个候选的假设、表达式、验证 IC、原创度、时序衰减和综合分数，最后只在冻结测试
+集评估优胜因子。可配置每轮候选数、复杂度惩罚、相似度惩罚和衰减惩罚。
+
+### Chain-of-Alpha
+
+参考论文：[Chain-of-Alpha: Unleashing the Power of Large Language Models for Alpha Mining in
+Quantitative Trading](https://arxiv.org/abs/2508.06312)。
+
+网页 MVP 使用双链结构：
+
+1. 生成链根据行情字段提出市场假设和初始因子；
+2. 系统在验证集计算 IC、复杂度和综合分数；
+3. 优化链读取上一轮的结构化反馈，修复或组合因子；
+4. 达到页面设置的轮数后冻结优胜因子，只在测试集评估一次。
+
+页面展示每轮最佳分数进度、所有候选的得分条和最终测试 IC。优化轮数限制为 1～3，每轮
+候选限制为 1～8，防止模型调用失控。
 
 ## 模型配置
 

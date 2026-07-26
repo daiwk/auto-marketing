@@ -183,6 +183,44 @@ def test_trading_agents_command_accepts_custom_review_opportunities(tmp_path: Pa
         manager.close()
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_option", "expected_value"),
+    [
+        (WebMode.ALPHA_AGENT, "--factor-decay-penalty", "0.7"),
+        (WebMode.CHAIN_OF_ALPHA, "--factor-optimization-rounds", "3"),
+    ],
+)
+def test_recent_paper_modes_are_configurable_from_web(
+    tmp_path: Path,
+    mode: WebMode,
+    expected_option: str,
+    expected_value: str,
+) -> None:
+    commands: list[list[str]] = []
+    manager = _manager(tmp_path, commands)
+    try:
+        run_id = manager.submit(
+            WebRunRequest(
+                mode=mode,
+                provider=WebProvider.CODEX,
+                factor_candidate_limit=6,
+                factor_optimization_rounds=3,
+                factor_complexity_penalty=0.002,
+                factor_novelty_penalty=0.2,
+                factor_decay_penalty=0.7,
+            )
+        )
+        run = manager.wait(run_id)
+        assert run is not None and run["status"] == "completed"
+        command = commands[0]
+        assert command[command.index("run") + 1] == mode.value
+        assert command[command.index("--factor-candidate-limit") + 1] == "6"
+        assert command[command.index(expected_option) + 1] == expected_value
+        assert run["factor_candidate_limit"] == 6
+    finally:
+        manager.close()
+
+
 def test_request_rejects_invalid_window_and_custom_review_count() -> None:
     with pytest.raises(ValidationError, match="开始日期必须早于结束日期"):
         WebRunRequest(
@@ -289,4 +327,9 @@ def test_web_page_contains_agent_board_and_equity_chart() -> None:
     assert 'id="targetVolatility"' in WEB_HTML
     assert 'id="targetVolatility" type="number" min="0.01" max="100" step="any"' in WEB_HTML
     assert 'id="initialCash" type="number" min="1" step="any"' in WEB_HTML
+    assert '<option value="alpha-agent">AlphaAgent 抗衰减因子</option>' in WEB_HTML
+    assert '<option value="chain-of-alpha">Chain-of-Alpha 双链优化</option>' in WEB_HTML
+    assert 'id="factorCandidateLimit"' in WEB_HTML
+    assert 'id="factorRounds"' in WEB_HTML
+    assert "renderFactorStudy" in WEB_HTML
     assert "parameters:parameters()" in WEB_HTML
