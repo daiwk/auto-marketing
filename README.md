@@ -58,6 +58,8 @@ quant-trader web --port 8080 --no-open-browser
 - **AlphaAgent（2025）**：对候选因子施加结构复杂度、新颖性和跨时期衰减惩罚。
 - **Chain-of-Alpha（2025）**：通过因子生成链、验证反馈和优化链迭代改进因子。
 - **Alpha Arena**：比较已经完成的 FinMem 或 QuantaAlpha 实验。
+- **OpenPM（2026）**：审计已完成回测的时间泄漏、仓位/回撤/换手约束和成本敏感性。
+- **KTD-Fin（2026）**：对已完成回测生成股票与日期匿名视图，并做市场、成长、规模归因。
 
 LLM 只能维持、减仓或拒绝规则已经选出的候选，不能绕过风险限制，也不能创建规则之外的
 股票和订单。因此 LLM 曲线不一定优于规则曲线。
@@ -92,6 +94,26 @@ Quantitative Trading](https://arxiv.org/abs/2508.06312)。
 
 页面展示每轮最佳分数进度、所有候选的得分条和最终测试 IC。优化轮数限制为 1～3，每轮
 候选限制为 1～8，防止模型调用失控。
+
+### OpenPM
+
+参考论文：[OpenPM: Auditable Point-in-Time Evaluation for LLM Portfolio-Management
+Agents](https://arxiv.org/abs/2608.09988)。
+
+先在网页完成一次规则或 TradingAgents 回测，再选择 OpenPM 和该历史任务。页面会展示逐笔
+成交的信号时间检查、总仓位/最大回撤/累计换手约束证书，以及 0～50 bps 的交易成本敏感性。
+评测会自动复用来源任务的时间窗口和参数。这是日线诊断性 MVP，不模拟市场冲击，也不代表
+可部署收益。该模式复用历史结果，不调用 LLM。
+
+### KTD-Fin
+
+参考论文：[From Knowing to Doing: A Memory-Controlled Benchmark for LLM Trading Agents on
+Stock Markets](https://arxiv.org/abs/2605.28359)。
+
+先完成规则或 TradingAgents 回测，再选择 KTD-Fin 和历史任务。页面会展示不含真实股票代码、
+自然日期的完全匿名样本，并对策略收益做轻量 Barra 风格的市场、成长和规模时间序列归因，
+输出选择 Alpha、因子暴露、贡献、残差波动率和 R²。它不是论文完整 CSI300/Barra 复现，主要
+用于降低记忆泄漏并解释收益来源，也不会调用 LLM。
 
 ## 模型配置
 

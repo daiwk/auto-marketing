@@ -25,6 +25,8 @@ from quant_trader.experiments.run import (
     run_alpha_arena,
     run_chain_of_alpha,
     run_finmem,
+    run_ktd_fin,
+    run_openpm,
     run_quanta_alpha,
 )
 from quant_trader.llm.base import LLMReviewer, MessageInput
@@ -351,6 +353,8 @@ def _run_experiment_command(
     factor_complexity_penalty: float = 0.001,
     factor_novelty_penalty: float = 0.10,
     factor_decay_penalty: float = 0.50,
+    source_run: Path | None = None,
+    benchmark_max_turnover: float = 4.0,
 ) -> None:
     client: MiniMaxReviewer | None = None
     dashboard_run = _DashboardRun(dashboard)
@@ -361,7 +365,7 @@ def _run_experiment_command(
         provider_name = "none"
         provider: LLMReviewer | None = None
         model = "none"
-        if kind != "alpha-arena":
+        if kind not in {"alpha-arena", "openpm", "ktd-fin"}:
             assert llm_provider is not None
             provider, client, provider_name = _open_provider(
                 settings, llm_provider, max_retries=0
@@ -439,12 +443,33 @@ def _run_experiment_command(
                 complexity_penalty=factor_complexity_penalty,
                 dashboard=update if dashboard else None,
             )
-        else:
+        elif kind == "alpha-arena":
             root = run_alpha_arena(
                 settings,
                 frames,
                 output_dir,
                 contestant_runs,
+                update if dashboard else None,
+            )
+        elif kind == "openpm":
+            if source_run is None:
+                raise ValueError("OpenPM requires a source web run")
+            root = run_openpm(
+                settings,
+                frames,
+                output_dir,
+                source_run,
+                max_turnover=benchmark_max_turnover,
+                dashboard=update if dashboard else None,
+            )
+        else:
+            if source_run is None:
+                raise ValueError("KTD-Fin requires a source web run")
+            root = run_ktd_fin(
+                settings,
+                frames,
+                output_dir,
+                source_run,
                 update if dashboard else None,
             )
         typer.echo(str(root))
@@ -583,6 +608,54 @@ def experiment_alpha_arena(
         start,
         end,
         tuple(contestant_run),
+    )
+
+
+@experiment_run_app.command("openpm")
+def experiment_openpm(
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output_dir: Annotated[Path, typer.Option()],
+    source_run: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    start: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    end: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    benchmark_max_turnover: Annotated[float, typer.Option(min=0.01, max=100)] = 4.0,
+) -> None:
+    """Audit one website backtest with the OpenPM protocol."""
+    _run_experiment_command(
+        "openpm",
+        config,
+        data_root,
+        output_dir,
+        None,
+        False,
+        start,
+        end,
+        source_run=source_run,
+        benchmark_max_turnover=benchmark_max_turnover,
+    )
+
+
+@experiment_run_app.command("ktd-fin")
+def experiment_ktd_fin(
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    data_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output_dir: Annotated[Path, typer.Option()],
+    source_run: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    start: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+    end: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"])] = None,
+) -> None:
+    """Run KTD-Fin masking and factor attribution for one website backtest."""
+    _run_experiment_command(
+        "ktd-fin",
+        config,
+        data_root,
+        output_dir,
+        None,
+        False,
+        start,
+        end,
+        source_run=source_run,
     )
 
 
