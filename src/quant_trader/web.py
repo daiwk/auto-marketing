@@ -53,6 +53,8 @@ class WebMode(StrEnum):
     ALPHA_AGENT = "alpha-agent"
     CHAIN_OF_ALPHA = "chain-of-alpha"
     ALPHA_ARENA = "alpha-arena"
+    OPENPM = "openpm"
+    KTD_FIN = "ktd-fin"
 
 
 class WebProvider(StrEnum):
@@ -115,6 +117,8 @@ class WebRunRequest(BaseModel):
     factor_novelty_penalty: float = Field(default=0.10, ge=0, le=1)
     factor_decay_penalty: float = Field(default=0.50, ge=0, le=2)
     contestant_ids: tuple[str, ...] = Field(default=(), max_length=20)
+    source_run_id: str | None = Field(default=None, min_length=1, max_length=64)
+    benchmark_max_turnover: float = Field(default=4.0, gt=0, le=100)
     parameters: WebParameters | None = None
 
     @model_validator(mode="after")
@@ -136,12 +140,18 @@ class WebRunRequest(BaseModel):
                 WebProvider.TRAEX,
             }:
                 raise ValueError("this mode requires MiniMax, Codex, or Trae X")
-        if self.mode is WebMode.ALPHA_ARENA and self.provider is not WebProvider.RULES:
-            raise ValueError("Alpha Arena is an artifact-only rules run")
+        artifact_modes = {WebMode.ALPHA_ARENA, WebMode.OPENPM, WebMode.KTD_FIN}
+        if self.mode in artifact_modes and self.provider is not WebProvider.RULES:
+            raise ValueError("artifact benchmark modes require the rules provider")
         if self.mode is not WebMode.ALPHA_ARENA and self.contestant_ids:
             raise ValueError("contestants are only valid for Alpha Arena")
         if len(set(self.contestant_ids)) != len(self.contestant_ids):
             raise ValueError("contestant ids must be unique")
+        if self.mode in {WebMode.OPENPM, WebMode.KTD_FIN}:
+            if self.source_run_id is None:
+                raise ValueError("benchmark mode requires a source web run")
+        elif self.source_run_id is not None:
+            raise ValueError("source run is only valid for OpenPM or KTD-Fin")
         if self.mode is WebMode.TRADING_AGENTS:
             if self.review_schedule is WebReviewSchedule.CUSTOM:
                 if (
@@ -338,6 +348,25 @@ class WebJobManager:
                     raise ValueError("Alpha Arena currently accepts FinMem or QuantaAlpha runs")
                 if not contestant.get("artifact_root"):
                     raise ValueError("contestant does not have a reusable artifact")
+            if request.source_run_id is not None:
+                source = self._jobs.get(request.source_run_id)
+                if source is None or source["status"] not in {"completed", "partial"}:
+                    raise ValueError("source must reference a completed web backtest")
+                if source["mode"] not in {
+                    WebMode.RULES.value,
+                    WebMode.TRADING_AGENTS.value,
+                }:
+                    raise ValueError("source must be a rules or TradingAgents backtest")
+                artifact_root = source.get("artifact_root")
+                if not artifact_root or not (Path(artifact_root) / "run.json").is_file():
+                    raise ValueError("source backtest result is unavailable")
+                request = request.model_copy(
+                    update={
+                        "start": date.fromisoformat(source["start"]),
+                        "end": date.fromisoformat(source["end"]),
+                        "parameters": WebParameters.model_validate(source["parameters"]),
+                    }
+                )
             parameters = request.parameters or self._default_parameters
             if parameters.traex_model not in self._traex_models:
                 raise ValueError("所选 Trae X 模型不在本机 traex models 列表中")
@@ -361,6 +390,8 @@ class WebJobManager:
                 "factor_novelty_penalty": request.factor_novelty_penalty,
                 "factor_decay_penalty": request.factor_decay_penalty,
                 "contestant_ids": list(request.contestant_ids),
+                "source_run_id": request.source_run_id,
+                "benchmark_max_turnover": request.benchmark_max_turnover,
                 "parameters": parameters.model_dump(mode="json"),
                 "status": "queued",
                 "created_at": _now(),
@@ -488,6 +519,15 @@ class WebJobManager:
                     )
                 )
             return command
+        if request.mode in {WebMode.OPENPM, WebMode.KTD_FIN}:
+            assert request.source_run_id is not None
+            artifact = self._jobs[request.source_run_id]["artifact_root"]
+            experiment.extend(("--source-run", str(Path(artifact) / "run.json")))
+            if request.mode is WebMode.OPENPM:
+                experiment.extend(
+                    ("--benchmark-max-turnover", str(request.benchmark_max_turnover))
+                )
+            return experiment
         for contestant_id in request.contestant_ids:
             artifact = self._jobs[contestant_id]["artifact_root"]
             experiment.extend(("--contestant-run", str(artifact)))
@@ -513,6 +553,8 @@ class WebJobManager:
                 WebMode.ALPHA_AGENT,
                 WebMode.CHAIN_OF_ALPHA,
                 WebMode.ALPHA_ARENA,
+                WebMode.OPENPM,
+                WebMode.KTD_FIN,
             }:
                 monitor = threading.Thread(
                     target=(
@@ -658,6 +700,8 @@ class WebJobManager:
             WebMode.ALPHA_AGENT: artifact / "alpha_agent" / "result.json",
             WebMode.CHAIN_OF_ALPHA: artifact / "chain_of_alpha" / "result.json",
             WebMode.ALPHA_ARENA: artifact / "alpha_arena" / "result.json",
+            WebMode.OPENPM: artifact / "openpm" / "result.json",
+            WebMode.KTD_FIN: artifact / "ktd_fin" / "result.json",
         }
         return {
             "summary": _read_json(artifact / "summary.json"),

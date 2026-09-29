@@ -221,6 +221,43 @@ def test_recent_paper_modes_are_configurable_from_web(
         manager.close()
 
 
+@pytest.mark.parametrize("mode", [WebMode.OPENPM, WebMode.KTD_FIN])
+def test_auditable_benchmark_reuses_completed_web_backtest(
+    tmp_path: Path, mode: WebMode
+) -> None:
+    commands: list[list[str]] = []
+    manager = _manager(tmp_path, commands)
+    try:
+        source_id = manager.submit(
+            WebRunRequest(mode=WebMode.RULES, provider=WebProvider.RULES)
+        )
+        source = manager.wait(source_id)
+        assert source is not None and source["status"] == "completed"
+        run_id = manager.submit(
+            WebRunRequest(
+                mode=mode,
+                provider=WebProvider.RULES,
+                source_run_id=source_id,
+                benchmark_max_turnover=5.5,
+            )
+        )
+        run = manager.wait(run_id)
+        assert run is not None and run["status"] == "completed"
+        command = commands[1]
+        assert command[command.index("run") + 1] == mode.value
+        assert Path(command[command.index("--source-run") + 1]).name == "run.json"
+        assert "--llm-provider" not in command
+        if mode is WebMode.OPENPM:
+            assert command[command.index("--benchmark-max-turnover") + 1] == "5.5"
+    finally:
+        manager.close()
+
+
+def test_benchmark_requires_completed_backtest_source() -> None:
+    with pytest.raises(ValidationError, match="requires a source"):
+        WebRunRequest(mode=WebMode.OPENPM, provider=WebProvider.RULES)
+
+
 def test_request_rejects_invalid_window_and_custom_review_count() -> None:
     with pytest.raises(ValidationError, match="开始日期必须早于结束日期"):
         WebRunRequest(
@@ -329,6 +366,11 @@ def test_web_page_contains_agent_board_and_equity_chart() -> None:
     assert 'id="initialCash" type="number" min="1" step="any"' in WEB_HTML
     assert '<option value="alpha-agent">AlphaAgent 抗衰减因子</option>' in WEB_HTML
     assert '<option value="chain-of-alpha">Chain-of-Alpha 双链优化</option>' in WEB_HTML
+    assert '<option value="openpm">OpenPM 可审计评测</option>' in WEB_HTML
+    assert '<option value="ktd-fin">KTD-Fin 匿名归因评测</option>' in WEB_HTML
+    assert 'id="sourceRun"' in WEB_HTML
+    assert "renderOpenPM" in WEB_HTML
+    assert "renderKTDFin" in WEB_HTML
     assert 'id="factorCandidateLimit"' in WEB_HTML
     assert 'id="factorRounds"' in WEB_HTML
     assert "renderFactorStudy" in WEB_HTML

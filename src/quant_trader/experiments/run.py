@@ -22,6 +22,10 @@ from quant_trader.strategies.v3_finmem import FinMemReviewer, MemoryBook
 from quant_trader.strategies.v4_quanta_alpha import QuantaAlphaMiner
 from quant_trader.strategies.v5_alpha_arena import AlphaArena, ArenaConfig
 from quant_trader.strategies.v6_recent_alpha import AlphaAgentMiner, ChainOfAlphaMiner
+from quant_trader.strategies.v7_auditable_benchmarks import (
+    KTDFinBenchmark,
+    OpenPMAuditor,
+)
 
 DashboardUpdate = Callable[[str, str, dict[str, object]], None]
 ProgressFactory = Callable[[object], object]
@@ -422,6 +426,98 @@ def run_alpha_arena(
     store.write_summary(
         ExperimentStatus.COMPLETED,
         {"provider_calls": 0, "contestant_count": len(runs), "completed_count": completed},
+    )
+    if dashboard is not None:
+        dashboard("complete", "completed", {"calls": 0, **result})
+    return store.root
+
+
+def _source_payload(source_run: Path) -> Mapping[str, Any]:
+    try:
+        payload = json.loads(source_run.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError("source run is not valid JSON") from error
+    if not isinstance(payload, Mapping):
+        raise ValueError("source run must contain a JSON object")
+    return payload
+
+
+def run_openpm(
+    settings: Settings,
+    frames: Mapping[str, pd.DataFrame],
+    output_dir: Path,
+    source_run: Path,
+    *,
+    max_turnover: float = 4.0,
+    dashboard: DashboardUpdate | None = None,
+) -> Path:
+    """Audit an existing web backtest with an OpenPM-inspired protocol."""
+    store = _create_store("openpm", settings, frames, output_dir, "none", "none", 1)
+    if dashboard is not None:
+        dashboard("prepare", "preparing", {"run_id": store.root.name, "calls": 0})
+    store.append_event(
+        "stage", "audit", "开始逐时点与组合约束审计。", ExperimentStatus.RUNNING
+    )
+    if dashboard is not None:
+        dashboard("audit", "running", {"calls": 0})
+    result = _json_safe(
+        OpenPMAuditor(
+            max_gross_exposure=settings.risk.max_gross_exposure,
+            max_drawdown=settings.risk.halt_drawdown,
+            max_turnover=max_turnover,
+        ).run(_source_payload(source_run))
+    )
+    assert isinstance(result, dict)
+    _write_json(store.root / "openpm" / "result.json", result)
+    certificate = result["contamination_certificate"]
+    constraint_report = result["constraint_report"]
+    metrics = result["metrics"]
+    store.append_event("result", "persist", "已生成可审计评测证书。")
+    store.write_summary(
+        ExperimentStatus.COMPLETED,
+        {
+            "provider_calls": 0,
+            "contamination_passed": certificate["passed"],
+            "constraints_passed": constraint_report["passed"],
+            "total_return": metrics["total_return"],
+            "turnover": metrics["turnover"],
+        },
+    )
+    if dashboard is not None:
+        dashboard("complete", "completed", {"calls": 0, **result})
+    return store.root
+
+
+def run_ktd_fin(
+    settings: Settings,
+    frames: Mapping[str, pd.DataFrame],
+    output_dir: Path,
+    source_run: Path,
+    dashboard: DashboardUpdate | None = None,
+) -> Path:
+    """Run KTD-Fin-inspired masking and factor attribution on a web backtest."""
+    store = _create_store("ktd-fin", settings, frames, output_dir, "none", "none", 1)
+    if dashboard is not None:
+        dashboard("prepare", "preparing", {"run_id": store.root.name, "calls": 0})
+    store.append_event(
+        "stage", "attribute", "开始匿名化评测与因子归因。",
+        ExperimentStatus.RUNNING,
+    )
+    if dashboard is not None:
+        dashboard("attribute", "running", {"calls": 0})
+    result = _json_safe(KTDFinBenchmark().run(_source_payload(source_run), frames))
+    assert isinstance(result, dict)
+    _write_json(store.root / "ktd_fin" / "result.json", result)
+    attribution = result["attribution"]
+    store.append_event("result", "persist", "已生成匿名评测与因子归因结果。")
+    store.write_summary(
+        ExperimentStatus.COMPLETED,
+        {
+            "provider_calls": 0,
+            "annualized_selection_alpha": attribution["annualized_selection_alpha"],
+            "attribution_r_squared": attribution["r_squared"],
+            "identifiers_masked": True,
+        },
     )
     if dashboard is not None:
         dashboard("complete", "completed", {"calls": 0, **result})

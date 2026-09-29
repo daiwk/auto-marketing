@@ -264,3 +264,75 @@ def test_alpha_arena_never_constructs_a_provider(
     rows = {row["name"]: row for row in arena["leaderboard"]}
     assert rows["contestant"]["status"] == "failed"
     assert rows["finmem"]["status"] == "absent"
+
+
+@pytest.mark.parametrize(
+    ("kind", "module"),
+    [("openpm", "openpm"), ("ktd-fin", "ktd_fin")],
+)
+def test_auditable_benchmark_commands_reuse_existing_backtest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    kind: str,
+    module: str,
+) -> None:
+    frames = _frames()
+    monkeypatch.setattr("quant_trader.cli._frames", lambda *args: frames)
+    monkeypatch.setattr(
+        "quant_trader.cli._open_provider",
+        lambda *args: (_ for _ in ()).throw(AssertionError("provider must not open")),
+    )
+    dates = frames["SPY"].index
+    source = tmp_path / "source.json"
+    source.write_text(
+        json.dumps(
+            {
+                "runs": {
+                    "rules_only": {
+                        "equity": {
+                            stamp.date().isoformat(): 100_000 + index * 100
+                            for index, stamp in enumerate(dates)
+                        },
+                        "gross_exposure": {
+                            stamp.date().isoformat(): 0.5 for stamp in dates
+                        },
+                        "fills": [
+                            {
+                                "decision_id": "candidate:20240105:digest",
+                                "execution_date": "2024-01-08",
+                                "shares": 10,
+                                "price": 102,
+                            }
+                        ],
+                        "metrics": {"costs": 1.5},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "runs"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "experiment",
+            "run",
+            kind,
+            "--config",
+            str(_config(tmp_path / "config.yaml")),
+            "--data-root",
+            str(tmp_path),
+            "--output-dir",
+            str(output),
+            "--source-run",
+            str(source),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    run = next(output.iterdir())
+    details = json.loads((run / module / "result.json").read_text())
+    assert details["paper"]["arxiv_id"] in {"2608.09988", "2605.28359"}
+    summary = json.loads((run / "summary.json").read_text())
+    assert summary["metrics"]["provider_calls"] == 0

@@ -75,7 +75,16 @@ def test_cli_help_exits_successfully() -> None:
 
 
 @pytest.mark.parametrize(
-    "kind", ["finmem", "quanta-alpha", "alpha-agent", "chain-of-alpha", "alpha-arena"]
+    "kind",
+    [
+        "finmem",
+        "quanta-alpha",
+        "alpha-agent",
+        "chain-of-alpha",
+        "alpha-arena",
+        "openpm",
+        "ktd-fin",
+    ],
 )
 def test_experiment_run_commands_exist(kind: str) -> None:
     result = CliRunner().invoke(app, ["experiment", "run", kind, "--help"])
